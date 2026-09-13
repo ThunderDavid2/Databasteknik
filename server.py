@@ -3,11 +3,15 @@ import shelve
 import socket
 import time
 
-from netcode import (PORT, JoinRequest, JoinResponse, PlayerState, ProtocolError,
-                     RemotePlayerState, RosterSnapshot, recv_msg, send_msg)
+from netcode import (
+    PORT, JoinRequest, JoinResponse, PlayerState, ProtocolError,
+    RemotePlayerState, RosterSnapshot, recv_msg, send_msg,
+)
 
-TINTS = [(255, 255, 255), (255, 120, 120), (120, 200, 255),
-         (160, 255, 140), (255, 220, 120), (220, 150, 255)]
+TINTS = [
+    (255, 255, 255), (255, 120, 120), (120, 200, 255),
+    (160, 255, 140), (255, 220, 120), (220, 150, 255),
+]
 TICK = 1 / 20
 SAVE_PATH = "players"
 AUTOSAVE = 5.0
@@ -35,8 +39,7 @@ def drop(save, clients, sock):
     info = clients.pop(sock, None)
     if info is not None:
         remember(save, info)
-        print("- %s (player %d) left (%d online)"
-              % (info["name"], info["id"], len(clients)), flush=True)
+        print("- %s (player %d) left (%d online)" % (info["name"], info["id"], len(clients)), flush=True)
     try:
         sock.close()
     except OSError:
@@ -44,9 +47,11 @@ def drop(save, clients, sock):
 
 
 def broadcast(save, clients):
-    players = [RemotePlayerState(info["id"], info["name"], info["tint"],
-                                 info["state"].x, info["state"].y)
-               for info in clients.values() if info["state"] is not None]
+    players = [
+        RemotePlayerState(info["id"], info["name"], info["tint"],
+            info["state"].x, info["state"].y)
+        for info in clients.values() if info["state"] is not None
+    ]
     payload = RosterSnapshot(players)
     for sock in list(clients):
         try:
@@ -72,9 +77,10 @@ def accept(save, listener, clients, next_id):
 
         send_msg(conn, JoinResponse(next_id, tint, resume))
         clients[conn] = {"id": next_id, "name": name, "tint": tint, "state": None}
-        print("+ %s joined as player %d from %s (%d online)%s"
-              % (name, next_id, addr[0], len(clients),
-                 "" if resume is None else " [resumed]"), flush=True)
+        print(
+            "+ %s joined as player %d from %s (%d online)%s"
+            % (name, next_id, addr[0], len(clients),
+                "" if resume is None else " [resumed]"), flush=True)
         return next_id + 1
     except (OSError, ProtocolError, ValueError) as e:
         print("  rejected %s: %s" % (addr[0], e), flush=True)
