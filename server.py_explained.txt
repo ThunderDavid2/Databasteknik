@@ -1,0 +1,348 @@
+====================================================================
+EXPLANATION: server.py
+====================================================================
+
+What this file is: This is the multiplayer server. It's the one program
+that all the players' games connect to. It doesn't draw anything on
+screen and it doesn't have any player controls of its own — its whole
+job is to keep track of where every connected player is standing, and
+to keep telling every player where everyone else is standing, many
+times per second, so everyone's game shows the same world. It's meant
+to be started once and left running (e.g. "python server.py"), separate
+from anyone's actual game window.
+
+It relies on a second file, netcode.py, for two things: the actual
+network plumbing (opening connections, sending and receiving messages)
+and the definitions of what a "message" can contain (e.g. "here is a
+player's position"). Think of netcode.py as the postal service, and
+this file (server.py) as the office that decides what to write in the
+letters and what to do with the letters it receives.
+
+--------------------------------------------------------------------
+MODULE-LEVEL SETTINGS (the constants at the top of the file)
+--------------------------------------------------------------------
+
+TINTS
+    A fixed list of 6 colors (as red/green/blue number triples). These
+    are handed out to players so that everyone's frog character can be
+    told apart on screen. There are only 6, so if more than 6 players
+    are online at once, colors start being reused.
+
+TICK
+    1/20th of a second. This is how often the server sends everyone an
+    update about where all the players currently are — 20 times per
+    second. "Tick" is a common game-dev term for "one step of the
+    game's clock."
+
+SAVE_PATH
+    The literal text "players". This is the name of the file the
+    server uses to remember players between sessions (see "shelve"
+    below). You'll see a file called "players" sitting in the project
+    folder — that's this save file, not something you should open or
+    edit by hand.
+
+AUTOSAVE
+    5.0 — the server writes everyone's current position to disk every
+    5 seconds, as a safety net, in addition to saving when a player
+    disconnects.
+
+A note on "shelve": Python has a built-in tool called "shelve" that
+works like a simple dictionary (a lookup table of key → value pairs)
+but one that is automatically saved to a file on disk, so its contents
+survive after the program closes and can be loaded again next time.
+This server uses it to remember, for each player name, their last
+known position and color, so a player who reconnects later resumes
+where they left off instead of restarting from scratch.
+
+====================================================================
+FUNCTIONS
+====================================================================
+
+--------------------------------------------------------------------
+remember(save, info)
+--------------------------------------------------------------------
+What it's for: Saves one player's current position and color into the
+long-term save file, so it isn't lost if they disconnect or the server
+restarts.
+
+How it works: "info" is the server's internal record for one connected
+player (their id number, name, color, and current position). This
+function first checks whether the player has actually sent a position
+yet at all — if they only just connected and haven't moved yet, there
+is nothing to save, so the function does nothing and returns
+immediately. Otherwise, it writes an entry into the save file, keyed by
+the player's name, containing their x and y coordinates and their
+color. Because the save file behaves like a dictionary, writing to
+save[name] either creates a brand new entry for a name never seen
+before, or overwrites the old entry for a returning player.
+
+Why it's built this way: Saving is keyed by player *name*, not by
+their id number, because id numbers are only valid for the current
+server session (they're handed out fresh every time someone connects)
+— but a name is what identifies "the same player" across multiple play
+sessions, possibly days apart.
+
+--------------------------------------------------------------------
+pick_tint(save, clients, name)
+--------------------------------------------------------------------
+What it's for: Decides what color a newly-connecting player's frog
+should be, and whether they should resume from a previously-saved
+position.
+
+How it works: First, it checks the save file to see if this player
+name has been seen before. If it has, the function immediately returns
+that player's previously-saved color and their previously-saved
+x/y position as a pair — this is what makes a returning player "pick up
+where they left off."
+
+If the name has never been saved before (a brand new player), the
+function instead looks at everyone who is *currently* online right
+now, collects the set of colors already in use among them, and walks
+through the fixed TINTS list looking for the first color nobody
+currently online is using. If it finds one, it returns that free
+color, along with "no saved position" (since this player has no
+history yet, they'll start at whatever default position the game
+client uses).
+
+If every single color in the TINTS list is already taken by someone
+currently online (which only becomes possible once more than 6 people
+are connected at the same time), the function falls back to just
+picking a color based on how many people are currently connected,
+which means colors start being reused among simultaneous players.
+
+Why it's built this way: The comment in the code above this function
+calls it temporary, noting it will eventually be replaced by a proper
+"pick your own character sprite" feature — for now it's a simple
+stand-in so different players are at least visually distinguishable.
+
+--------------------------------------------------------------------
+drop(save, clients, sock)
+--------------------------------------------------------------------
+What it's for: Cleanly disconnects a player — used both when a player
+closes their game normally and when something goes wrong with their
+connection.
+
+How it works: "sock" is the network connection (the "socket") for the
+player being dropped. The function removes that player's entry from
+the "clients" dictionary (the server's live list of who's currently
+connected). If there was in fact an entry for them (as opposed to the
+function being called on a connection that was never fully
+registered), it saves their final position to disk using "remember"
+(described above) and prints a line to the server's console log saying
+who left and how many people remain online. Finally, it closes the
+underlying network connection. Closing a connection can sometimes
+raise a network-level error if the connection was already broken in
+some way — that specific kind of error is deliberately ignored here,
+since the goal (the connection being closed) is already achieved
+either way.
+
+--------------------------------------------------------------------
+broadcast(save, clients)
+--------------------------------------------------------------------
+What it's for: Sends every connected player an up-to-date snapshot of
+where everyone currently is. This is what makes multiplayer actually
+work — it's called 20 times per second (once per "tick").
+
+How it works: The function builds one combined list describing every
+player who has sent at least one position update so far (players who
+just joined and haven't moved yet are left out, since there's nothing
+useful to say about them yet). Each entry in that list records a
+player's id, name, color, and current x/y position. This combined list
+is then wrapped up into a single message (a "RosterSnapshot" — see
+netcode.py_explained.txt for what that is) and sent to every currently
+connected player, one at a time, over their individual network
+connection.
+
+If sending to a particular player fails (for example, because their
+connection has quietly broken without the server noticing yet), that
+specific player is treated as disconnected: they're removed via
+"drop" and everyone else's broadcast simply continues — one broken
+connection doesn't stop the update from reaching everybody else.
+
+Why it's built this way: The list of currently-connected sockets is
+copied before looping over it ("list(clients)") because the loop body
+can modify "clients" itself (a dropped player is removed from it) —
+looping directly over something you're also modifying at the same time
+would cause errors or skipped entries.
+
+--------------------------------------------------------------------
+accept(save, listener, clients, next_id)
+--------------------------------------------------------------------
+What it's for: Runs once every time a new player tries to connect to
+the server. It's the "bouncer at the door" — it figures out who this
+new player is, gives them a color and a starting position, and either
+lets them into the game or turns them away if something about their
+connection looks wrong.
+
+How it works: The function starts by accepting the raw incoming
+network connection from the "listener" (the socket that's always
+waiting for new players to show up). Accepting it gives us two things:
+a new dedicated connection just for this player ("conn"), and their
+network address ("addr"), which is only used for the log messages.
+
+Because a brand-new connection could belong to a broken or malicious
+client, everything from here on happens inside a "try/except" block —
+a way of saying "attempt the following steps, but if any of them fail,
+skip straight to the recovery code below instead of crashing the whole
+program."
+
+First, the connection is configured: a network-level setting is turned
+on so that small messages get sent immediately instead of being
+delayed and bundled together (this matters for a real-time game —
+every fraction of a second counts for smooth movement), and a
+5-second timer is started so that if this new connection just sits
+there without sending anything, the server won't wait on it forever.
+
+The server then waits to receive the very first message this player
+sends, which is expected to be a "join request" — basically the player
+introducing themselves with a name they'd like to use. If what arrives
+isn't a proper join request (for example garbled data, or some other
+kind of message entirely), the code deliberately treats this as an
+error, which is caught further down and handled as a rejected
+connection. If a valid join request WAS received, the 5-second timer
+is removed, because from this point on the server is happy to wait
+indefinitely for messages from this player during normal play (a
+connected player might legitimately stand still for a long time).
+
+Next, the server decides on the player's final display name. It
+checks whether anyone currently online is already using the name this
+player asked for; if so, it makes the new name unique by adding a "~"
+followed by the new player's id number (e.g. "alice" becomes
+"alice~7"), so two players are never confused with each other on
+screen or in the save file.
+
+Then the server decides the player's color and starting position by
+calling the "pick_tint" helper function described above. If this
+player has connected before under this name, their previously-saved
+color and position are reused, so they resume where they left off. If
+not, they're handed a fresh, currently-unused color.
+
+With all of that decided, the server sends a response back to the
+player containing their assigned id number, their color, and (if
+they're resuming a past session) their saved position. The player is
+then added to the "clients" dictionary — the central record the rest
+of the server uses to track everyone currently connected — storing
+their id, name, color, and a placeholder (empty) position, which will
+be filled in as soon as they start sending their own movement updates.
+A line is printed to the server's console log announcing the new
+player, and the function returns the *next* available id number, so
+whoever connects after this player gets a fresh id nobody has used
+before.
+
+If anything went wrong anywhere in that process — the connection
+dropped, the message was invalid, the 5-second wait timed out — the
+"except" part of the code takes over instead: it prints a rejection
+message to the console, removes any partial record of this player from
+the clients dictionary (in case one was created before the failure),
+closes the connection, and returns the id number completely unchanged,
+since this failed attempt never actually used one.
+
+Quick summary:
+ - Accept the incoming connection.
+ - Wait (up to 5 seconds) for the player to introduce themselves.
+ - Make sure their chosen name isn't already taken; adjust it if it is.
+ - Look up or assign their color and starting position.
+ - Send that information back to the player and register them.
+ - Log the join, and hand back the next available id for future players.
+ - If any step fails, log a rejection, clean up, and don't consume an id.
+
+Why it's built this way: The id counter only advances on a successful
+join, so a rejected connection attempt never "wastes" a number. Since
+the name-uniqueness suffix uses the id that this same function is
+about to assign, the "~" suffix on a name always matches the actual id
+the server gave that player, not some unrelated counter.
+
+--------------------------------------------------------------------
+main()
+--------------------------------------------------------------------
+What it's for: This is the entry point of the whole server — the
+function that actually starts everything up and keeps it running until
+the server is shut down. Everything above this (remember, pick_tint,
+drop, broadcast, accept) exists to be *used* by main; main is where the
+server's continuous loop of "wait for something to happen, react to
+it" actually lives.
+
+How it works: It begins by creating the "listener" — the socket that
+will sit and wait for new players to try to connect. A setting is
+enabled that allows the server to be restarted quickly after being
+stopped, without the operating system complaining that the port is
+still "in use" from the previous run. The listener is bound to port
+50007 (a fixed number defined in netcode.py) on all of the machine's
+network interfaces, and told to allow up to 8 connection attempts to
+queue up if they arrive faster than the server can accept them. A
+startup message is printed to the console.
+
+Next, the save file described earlier is opened (creating it if it
+doesn't already exist), and a few pieces of state are initialized: an
+empty "clients" dictionary (nobody is connected yet), the id number
+to hand out to the very first player who joins (starting at 1), and
+two "alarm clock" style timestamps — one for when the next broadcast
+tick should happen, and one for when the next autosave should happen.
+
+The server then enters its main loop, which repeats forever until it's
+manually stopped. Each time around the loop, it uses a system feature
+called "select" to efficiently wait until either (a) a new player is
+trying to connect, (b) an already-connected player has sent a message,
+or (c) it's time for the next tick — whichever comes first. This is
+far more efficient than constantly checking each connection in a
+tight loop with no waiting, because the program can sleep until there
+is actually something to do.
+
+For each connection that has something ready to read: if it's the
+listener itself, that means a brand-new player is trying to connect,
+so "accept" is called to handle the handshake, and the id counter is
+updated with whatever it returns. Otherwise, it's an existing player
+sending a message — the server tries to read it; if reading fails for
+any reason, or if what comes back is empty (meaning the connection
+was closed on the other end), the player is treated as having
+disconnected and "drop" is called for them. If a valid message did
+come through and it turns out to be a position update (the player
+saying "I am now at this x/y"), that becomes their new stored
+position.
+
+After handling every connection that had something ready, the loop
+checks whether enough time has passed to run the next scheduled tick;
+if so, it calls "broadcast" to send everyone the latest positions, and
+schedules the following tick 1/20th of a second later. Separately, it
+also checks whether it's time for the periodic autosave; if so, it
+calls "remember" for every currently-connected player and reschedules
+the next autosave 5 seconds later.
+
+The loop keeps repeating this cycle indefinitely. If the person
+running the server presses Ctrl-C, that interrupt is specifically
+caught and treated as a normal, deliberate shutdown request rather
+than a crash — a friendly "shutting down" message is printed instead
+of an error. Regardless of how the loop ends (a clean Ctrl-C, or any
+other unexpected error), a final cleanup section always runs: every
+still-connected player's position is saved one last time, the save
+file is properly closed, and the listener socket is closed too.
+
+Quick summary:
+ - Set up the listener socket on the game's fixed port.
+ - Open the save file and set up empty tracking state.
+ - Loop forever:
+    - Efficiently wait for new connections, incoming messages, or the
+      next scheduled tick — whichever happens first.
+    - Accept new connections, or read and apply messages from existing
+      players (dropping anyone whose connection has failed).
+    - If it's time, broadcast everyone's positions to everyone.
+    - If it's time, autosave everyone's positions to disk.
+ - On Ctrl-C (or any other exit), save everyone one final time and
+   close everything down cleanly.
+
+Why it's built this way: Using "select" instead of one thread per
+player keeps the whole server single-threaded and simple, which avoids
+a whole class of bugs around multiple threads reading/writing the same
+data at the same time — appropriate for a small game server that isn't
+expecting huge numbers of simultaneous players. The "finally" block at
+the very end guarantees data gets saved and sockets get closed even if
+something goes wrong partway through, rather than only on the "happy
+path."
+
+--------------------------------------------------------------------
+if __name__ == "__main__": main()
+--------------------------------------------------------------------
+This is a standard Python idiom meaning "only run main() if this file
+is being run directly (e.g. `python server.py`), not if it's imported
+by some other file." It's what actually kicks the whole server off
+when you run the file.

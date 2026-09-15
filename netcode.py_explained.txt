@@ -1,0 +1,364 @@
+====================================================================
+EXPLANATION: netcode.py
+====================================================================
+
+What this file is: This is the shared "networking toolkit" used by
+both sides of the multiplayer system — the server (server.py) and
+every game client (the notebook, and the headless test bot
+dummy_player.py). It defines two things: (1) what kinds of messages
+can be sent back and forth between the server and a player's game
+("JoinRequest", "PlayerState", etc.), and (2) the low-level machinery
+for actually sending and receiving those messages reliably over a
+network connection. Both the server and every client import this same
+file, so they always agree on the "language" they're speaking to each
+other.
+
+A few networking terms used throughout this explanation:
+ - "socket": a live network connection between two programs — think of
+   it as a phone line that's been picked up and connected.
+ - "TCP": the underlying network technology being used here. Its key
+   property for us is that it's a reliable stream of bytes — data
+   arrives in order and nothing goes missing — but it doesn't
+   automatically know where one "message" ends and the next begins;
+   that's something this file has to handle itself (see recv_msg
+   below).
+ - "byte(s)": the basic unit that raw data is measured and sent in.
+ - "pickle": a built-in Python feature that can turn a Python object
+   (like an instance of the PlayerState class below) into a stream of
+   bytes that can be sent somewhere else and turned back into an
+   equivalent Python object on the other end. It's what makes it
+   possible to just say "send this object" instead of manually
+   converting positions and names into raw bytes by hand.
+
+--------------------------------------------------------------------
+MODULE-LEVEL SETTINGS (the constants at the top of the file)
+--------------------------------------------------------------------
+
+PORT
+    50007. The fixed network port number the server listens on and
+    every client connects to. Both server.py and this file's NetClient
+    use this same number so they find each other.
+
+HEADER
+    A description of "a single 4-byte number, in a specific standard
+    byte order." This is used to describe, in advance, how long the
+    *next* message is going to be — see recv_msg/send_msg below for
+    why that matters.
+
+MAX_MSG
+    64 * 1024 = 65536 bytes (64 "kibibytes"). The largest message
+    this system will ever send or accept. This exists as a safety
+    limit — see send_msg and recv_msg.
+
+PROTOCOL
+    The most efficient/modern version of Python's pickle format that
+    the running Python installation supports. Used whenever a message
+    is turned into bytes to be sent.
+
+ALLOWED
+    A specific, hand-picked list of exactly which kinds of objects are
+    allowed to be reconstructed from incoming bytes: JoinRequest,
+    JoinResponse, PlayerState, RemotePlayerState, and RosterSnapshot
+    (all five defined further down in this file). This list is central
+    to the SafeUnpickler class explained below — it's a security
+    boundary, not just documentation.
+
+====================================================================
+THE MESSAGE CLASSES: JoinRequest, JoinResponse, PlayerState,
+RemotePlayerState, RosterSnapshot
+====================================================================
+
+These five classes aren't really "doing" anything themselves — each
+one is just a small, named container for a few pieces of data,
+whose only job is to be sent from one side of the connection to the
+other. None of them have any special methods (behavior); each one's
+"__init__" method simply takes in a few values and stores them as
+attributes on itself, so that the *receiving* side can read those
+attributes back out. Here's what each one carries and when it's used:
+
+JoinRequest(name)
+    Sent by a client to the server the moment it connects, to say
+    "hello, I'd like to join, and the name I'd like to use is ...".
+
+JoinResponse(pid, tint, resume=None)
+    Sent by the server back to a client immediately after a
+    JoinRequest, to say "you're in — here's the id number
+    (pid = "player id") I've assigned you, here's the color (tint)
+    you'll appear as, and (if you've played before) here's the
+    position you should resume at." "resume" defaults to nothing
+    (None) for a brand-new player who has no saved position.
+
+PlayerState(x, y)
+    Sent repeatedly by a client to the server, roughly 20 times per
+    second, to say "I am now at this x/y position." This is how the
+    server finds out where each player is moving to.
+
+RemotePlayerState(pid, name, tint, x, y)
+    Used inside a RosterSnapshot (below) to describe one *other*
+    player, from a given client's point of view — their id, name,
+    color, and current position, so that client can draw them on
+    screen.
+
+RosterSnapshot(players)
+    Sent repeatedly by the server to every client, roughly 20 times
+    per second, containing a full list of RemotePlayerState objects —
+    one for every player currently known to be online. This is how
+    every client's game finds out where everyone else is.
+
+--------------------------------------------------------------------
+ProtocolError
+--------------------------------------------------------------------
+A custom kind of error (an "Exception") defined specifically for this
+file. It's raised whenever something arrives over the network that
+doesn't make sense as a valid message — for example, a message that's
+too large, or one that can't be decoded at all. Having its own
+specific error type (rather than reusing a generic one) makes it easy
+for the code that calls into this file to specifically catch and
+handle "the network said something we don't understand," separately
+from other, unrelated kinds of errors.
+
+--------------------------------------------------------------------
+SafeUnpickler (and its find_class method)
+--------------------------------------------------------------------
+What it's for: This exists purely as a security safeguard. Normally,
+Python's pickle feature is powerful enough that unpickling data from
+an untrusted source is dangerous — a maliciously crafted stream of
+bytes could, in principle, be built to make the unpickling process
+construct and run arbitrary, harmful code, not just "safe" data
+objects. Since this project accepts pickled data over the network from
+whoever connects, that's a genuine risk if left unguarded.
+
+How it works: SafeUnpickler is built on top of Python's normal
+unpickling machinery, but overrides one specific step: whenever the
+unpickling process is about to reconstruct some class of object, it
+first asks "is this exact (module, class name) pair on the ALLOWED
+list?" If it's not — for example, if the incoming data tried to
+construct some other, unexpected type of Python object — the process
+immediately refuses and raises an error instead of proceeding. Only
+the five message classes defined in this same file (JoinRequest,
+JoinResponse, PlayerState, RemotePlayerState, RosterSnapshot) are on
+that allowed list, so no other kind of object can ever be created this
+way, no matter what bytes an attacker sends.
+
+Why it's built this way: This turns "receive a message from the
+network" from an open-ended, dangerous operation into one that can
+only ever produce one of a few known, harmless data containers — an
+important safety boundary given that the server is designed to accept
+connections from anyone.
+
+====================================================================
+LOW-LEVEL SEND/RECEIVE FUNCTIONS
+====================================================================
+
+--------------------------------------------------------------------
+recv_exact(sock, n)
+--------------------------------------------------------------------
+What it's for: A small helper used internally by recv_msg (below).
+Its job is simply: "keep reading from this connection until I have
+exactly n bytes, however many separate reads that takes."
+
+How it works: Network reads don't guarantee you get all the data you
+asked for in one go — a single call to read from a socket might return
+anywhere from 0 bytes up to the amount requested, and you often need
+to call it again for the rest. This function loops, repeatedly asking
+for whatever bytes are still missing, and appending each chunk it
+receives onto a growing buffer, until the buffer finally holds exactly
+"n" bytes — at which point it returns those bytes. If, at any point, a
+read comes back completely empty, that specifically means the other
+side has closed the connection, so the function gives up early and
+returns "nothing" (None) instead of pretending it succeeded.
+
+--------------------------------------------------------------------
+send_msg(sock, obj)
+--------------------------------------------------------------------
+What it's for: Sends any one of the message objects described earlier
+(a JoinRequest, PlayerState, etc.) over a connection, in a way the
+other side can reliably read back as one complete message.
+
+How it works: It first converts the given object into raw bytes using
+pickle. If the result is larger than the MAX_MSG safety limit (64 KB),
+it deliberately refuses to send it at all, raising an error instead —
+this protects both sides from ever dealing with an unreasonably huge
+message. Otherwise, it sends a small fixed-size header first (4 bytes,
+containing the exact length of the message that's about to follow),
+immediately followed by the message's bytes themselves, in a single
+network send call.
+
+Why it's built this way: TCP only guarantees that bytes arrive in
+order — it does not, on its own, tell the receiver where one message
+ends and the next begins. By always sending "how many bytes are
+coming" right before the actual data, the receiving side (recv_msg,
+below) always knows exactly how much to read for one complete message,
+even if several messages are sent back-to-back.
+
+--------------------------------------------------------------------
+recv_msg(sock)
+--------------------------------------------------------------------
+What it's for: The receiving counterpart to send_msg — reads exactly
+one complete message from a connection and turns it back into the
+original Python object (a JoinRequest, PlayerState, etc.).
+
+How it works: It first reads exactly 4 bytes (using recv_exact) to get
+the header that send_msg always sends first, which tells it how many
+bytes the actual message will be. If those 4 header bytes never
+arrive at all (the connection closed before sending anything), the
+function returns "nothing" (None), signaling "there was no message —
+the connection appears to be gone." If a length was successfully read
+but it's larger than MAX_MSG, that's treated as a protocol violation
+and an error is raised immediately, without even trying to read that
+much data — a defense against a corrupted or hostile sender claiming
+an enormous message size. Otherwise, it reads exactly that many bytes
+(again using recv_exact) to get the message body itself. Finally, it
+runs those bytes through SafeUnpickler (described above) to reconstruct
+the original object; if that step fails for any reason — corrupted
+data, or an attempt to sneak in a disallowed type of object — it's
+caught and re-raised as this file's own ProtocolError, giving callers
+one consistent kind of error to handle for "the network said something
+we couldn't understand."
+
+Why it's built this way: Structuring receive as "read the length,
+then read exactly that many bytes" is the direct mirror of how
+send_msg writes data, and is what allows individual messages to be
+told apart reliably over a connection that's really just one
+continuous stream of bytes.
+
+====================================================================
+NetClient — the class every game client uses to talk to the server
+====================================================================
+
+What it's for: This is the piece that both the notebook game and the
+headless test bot (dummy_player.py) use to actually connect to the
+server and exchange data with it, without either of them needing to
+know anything about headers, pickling, or the message classes
+directly. From the outside, using it looks like: create one, then
+repeatedly call ".update(x, y)" once per frame, and read back the list
+of other players from what it returns.
+
+--------------------------------------------------------------------
+NetClient.__init__(self, host, name, port=PORT)
+--------------------------------------------------------------------
+What it's for: Creates a brand-new connection to the server and
+performs the initial "joining" handshake, so that by the time this
+finishes, the client is fully registered and ready to start sending
+position updates.
+
+How it works: It opens a network connection to the given server
+address ("host") and port (defaulting to the game's standard port,
+50007), giving up if the connection can't be established within 5
+seconds. It enables the same "send small messages immediately, don't
+delay them" network setting that the server also uses, for
+responsiveness. It then immediately sends a JoinRequest containing the
+desired player name, and waits for a reply. If what comes back isn't
+actually a proper JoinResponse (for example, if the server rejected
+the connection or sent something unexpected), the connection is closed
+immediately and an error is raised — since without a valid response
+there's no way to proceed.
+
+Assuming a valid response was received, several pieces of information
+from it are stored on the client for later use: the id number the
+server assigned this player, the color it should appear as, and (if
+returning to a previous session) the position it should resume at. The
+5-second connection timeout is then removed (ordinary gameplay
+shouldn't have any such limit), the client is marked as
+successfully connected, and two more pieces of internal state are set
+up: an empty list to hold information about other players (filled in
+later, once the server starts sending updates), and a record of when a
+position was last sent (used by _send, below, to control how often
+updates go out).
+
+--------------------------------------------------------------------
+NetClient.update(self, x, y)
+--------------------------------------------------------------------
+What it's for: This is the single method a game is expected to call
+once per frame, in its main loop. It's a convenience wrapper that does
+both halves of "talking to the server" in one call: tell the server
+where I am, and check whether the server has told me anything new.
+
+How it works: It first calls the internal "_send" method with the
+player's current position (described next), then calls the internal
+"_drain" method to process any incoming messages (also described
+next), and finally returns whatever the client currently believes the
+list of other players to be — which the caller (the game) can then use
+to draw everyone else on screen.
+
+--------------------------------------------------------------------
+NetClient._send(self, x, y)  [an internal/"private" helper]
+--------------------------------------------------------------------
+What it's for: Sends the player's current position to the server —
+but only if the connection is actually still alive, and not more
+often than a fixed rate limit.
+
+How it works: If the client has already given up on the connection
+(see _die, below), this does nothing. Otherwise, it checks how much
+time has passed since the last time a position was actually sent; if
+less than 1/20th of a second (matching SEND_HZ = 20) has passed, it
+does nothing this time either — this is what prevents the client from
+flooding the network with far more updates than the server actually
+needs. If enough time has passed, it records "now" as the new "last
+sent" time and sends a PlayerState message with the given x/y. If
+sending fails for any network-related reason, the connection is
+considered dead and "_die" is called to update the client's internal
+state accordingly.
+
+Why it's built this way: The name starts with an underscore as a
+Python convention meaning "this is an internal implementation detail,
+not meant to be called directly from outside this class" — code using
+NetClient is expected to call "update", not "_send", directly.
+
+--------------------------------------------------------------------
+NetClient._drain(self)  [an internal/"private" helper]
+--------------------------------------------------------------------
+What it's for: Checks whether the server has sent anything new, and if
+so, processes all of it, without ever making the game wait or freeze
+if there's nothing to read.
+
+How it works: It loops, and each time around, first checks — without
+blocking or waiting even a moment — whether there is any data
+currently available to read on the connection. If there is nothing
+available right now, the function simply returns, leaving the rest of
+the game free to keep running at full speed. If there IS something
+available, it reads one complete message; if reading fails, or the
+connection turns out to have closed, the connection is considered dead
+("_die" is called) and the function stops. If a valid message was
+read and it turns out to be a RosterSnapshot (the "here's where
+everyone currently is" message described in netcode's message
+classes), the client updates its internal list of "other players" from
+it — specifically excluding the entry that describes the client's own
+player (identified by matching id), since a game only needs to draw
+players other than itself. The loop then goes around again, in case
+several messages had queued up and are all ready to be processed at
+once, before finally returning once the connection has been drained.
+
+Why it's built this way: Checking "is anything available?" before
+reading (rather than just reading directly) is what makes this
+non-blocking — critical for a real-time game, where the main loop must
+keep running (drawing frames, reading input) at a steady rate even if
+the server hasn't sent anything new since the last check.
+
+--------------------------------------------------------------------
+NetClient._die(self)  [an internal/"private" helper]
+--------------------------------------------------------------------
+What it's for: A small shared helper that marks the connection as no
+longer usable, called from a few different places whenever a network
+problem is detected (a failed send, a failed read, or the connection
+closing).
+
+How it works: It sets the client's "connected" flag to False, and
+clears its list of other players back to empty (since once the
+connection is gone, there's no way to keep that list up to date, and
+showing outdated/stale positions on screen would be misleading).
+
+--------------------------------------------------------------------
+NetClient.close(self)
+--------------------------------------------------------------------
+What it's for: Deliberately, cleanly shuts down the connection — the
+method a game calls when it's exiting normally (e.g. the player closed
+the game window).
+
+How it works: It calls "_die" (described above) to update the
+client's internal state the same way it would if the connection had
+failed on its own, and then attempts to close the underlying network
+connection. If closing raises a network-level error (for example,
+because the connection had already broken on its own before this was
+called), that specific error is deliberately ignored, since the end
+goal — the connection being closed — is already achieved either way.

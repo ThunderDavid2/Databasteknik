@@ -1,0 +1,561 @@
+====================================================================
+EXPLANATION: SpelLokalt.ipynb
+====================================================================
+
+What this file is: "SpelLokalt" is Swedish for "Game Locally" — this
+is the actual playable game. It's a Jupyter notebook rather than an
+ordinary ".py" file, which means it's made up of separate "cells" that
+get run one at a time, in order, from top to bottom, inside a tool
+like Jupyter Notebook or JupyterLab, rather than being run all at once
+from the command line. Because later cells rely on things defined in
+earlier cells (variables, functions, classes), running them out of
+order — or skipping one — will cause errors or broken behavior. Every
+time you want to (re)start the game, you're expected to re-run the
+cells from the top.
+
+This notebook uses "pygame" (a popular Python library for building
+simple 2D games) to open a window, draw images to the screen, and read
+keyboard input. It also connects to the separate multiplayer server
+(server.py) using the NetClient class from netcode.py, so that this
+player's game window can show other players moving around live.
+
+A few game-development terms used throughout this explanation:
+ - "sprite" / "image": a picture used to represent something on
+   screen — the frog, a bush, a tile of ground, etc.
+ - "tile": one small, reusable square image (like one ground block)
+   that gets repeated many times to build up a bigger scene, the way
+   you'd tile a floor with identical tiles.
+ - "rect" (rectangle): a simple box shape defined by an x/y position
+   plus a width and height, used constantly in this file to represent
+   "where something is and how big it is," and to check whether two
+   things are overlapping (a "collision").
+ - "x / y coordinates": positions in the game world. x increases to
+   the right; y INCREASES DOWNWARD (this is the opposite of ordinary
+   graph paper, but standard for computer screens/games) — so a
+   *smaller* (more negative) y value means *higher up* in this game,
+   which matters a lot for understanding the world-layout data below,
+   since the world is built going upward.
+ - "frame": one single drawn image, shown for a fraction of a second;
+   a game is really just many frames shown one after another, fast
+   enough to look like smooth motion.
+
+--------------------------------------------------------------------
+CELL 0 — Imports and setup
+--------------------------------------------------------------------
+What it's for: Loads all the outside tools this notebook depends on,
+and starts up pygame itself.
+
+How it works: It imports a handful of Python's own built-in tools
+(some of which, like "pickle" and "threading", aren't actually used
+directly anywhere else in this notebook — likely leftover from earlier
+experimentation), the pygame library itself, Python's "random" number
+generator (used later for scattering decorations around the world),
+and this project's own NetClient class from netcode.py (the piece that
+handles talking to the multiplayer server). Finally, "pygame.init()"
+performs pygame's required startup steps, which must happen before any
+other pygame feature (like opening a window or loading an image) is
+used.
+
+--------------------------------------------------------------------
+CELL 1 — Loading images
+--------------------------------------------------------------------
+What it's for: Opens the game window and loads every image the game
+will need onto it in advance, so the main game loop later on can just
+draw them quickly without pausing to load anything from disk.
+
+How it works: First, a 1920x1080 (Full HD) window is created. Then,
+one by one, image files are loaded from disk: two different sky
+backgrounds (red and blue — used for different "heights" in the game,
+see the Camera class below), a "victory" image shown when the player
+wins, and two "tilesheets" (single image files containing several
+smaller pictures packed together side by side): "terrainSheet.png"
+and "world_tileset.png". For each of these full-image files, some
+processing happens: "convert()"/"convert_alpha()" reformats the image
+into a form pygame can draw much faster (this is a standard,
+recommended step after loading any image in pygame), and
+"pygame.transform.scale"/"scale_by" resizes them (the backgrounds are
+stretched to exactly fill the screen; other images are enlarged 3x
+their original pixel size, since the source art is small and pixelated
+by design).
+
+From the two tilesheets, several smaller pieces are cut out using
+".subsurface(pygame.Rect(...))" — this carves out one small rectangle
+from a bigger sheet, treating that rectangle as its own separate image:
+the platform tile, the frog player image, a "ground" tile (the top
+surface of the terrain), a "below" tile (the terrain underneath the
+surface), a pumpkin decoration, a green bush decoration, an
+exclamation mark (used to mark a special point in the world, see the
+Camera class), and an orange bush decoration. Each of these cut-out
+pieces is then also enlarged 3x, matching the rest of the art.
+
+--------------------------------------------------------------------
+CELLS 2-4 — Basic world-layout data (PLATFORMS, GROUND, BELOW)
+--------------------------------------------------------------------
+What this data is: These cells don't define any functions — they
+build plain lists of x/y positions that describe where things sit in
+the game world. This hand-designed layout is effectively "the level"
+— there's no separate level file or level editor; the world is defined
+directly as data, right here in the notebook.
+
+PLATFORMS (cell 2): First, the actual pixel width/height of one
+platform tile is read off the image loaded earlier. Then PLATFORMS is
+a hand-written list of 16 (x, y) positions — each one the top-left
+corner of one free-floating platform placed somewhere in the world.
+Remember, more negative y means higher up, so this list places
+platforms at a wide range of heights, mostly going up (the numbers get
+increasingly negative).
+
+GROUND (cell 3): This builds a long, evenly-spaced row of ground tile
+positions, laid side-by-side, forming a continuous strip of solid
+ground near the bottom of the starting area of the world (from x=-100
+up to x=2220, one tile-width apart). This is the "floor" the player
+starts standing on.
+
+BELOW (cell 4): Similar idea, but building a filled-in block *beneath*
+that strip of ground (10 rows deep), so the ground looks solid from
+above rather than being a paper-thin floating strip with empty space
+visible underneath it.
+
+--------------------------------------------------------------------
+CELL 5 — make_island(x, y, width, height)
+--------------------------------------------------------------------
+What it's for: A reusable helper function for generating one "island"
+— a small floating platform made of ground tiles on top and filled-in
+tiles underneath, similar in spirit to the ground built in cells 3-4,
+but sized and placed wherever you like instead of being one long
+continuous strip.
+
+How it works: "x" and "y" describe where the island's top-left ground
+tile should be; "width" and "height" describe how many tiles wide and
+how many tiles tall the island should be (measured in tile-units, not
+pixels). Two safety checks ("assert") run first, refusing to continue
+if width or height fall outside sensible ranges (2 to 18 tiles wide,
+2 to 10 tiles tall) — this is a guard against accidentally passing in
+a nonsensical size by mistake, since these numbers come from
+hand-typed data in the next cell. The function then builds two
+separate lists: one row of "ground_tiles" positions (the visible top
+surface, spanning the given width), and a block of "below_tiles"
+positions beneath it (filling in all the remaining rows down to the
+given height, across the same width), then returns both lists as a
+pair.
+
+--------------------------------------------------------------------
+CELL 6 — ISLANDS (data) and building the rest of the world
+--------------------------------------------------------------------
+What this data is: ISLANDS is a large, hand-written list of islands to
+place in the world — 47 entries, each one an (x, y, width, height)
+tuple describing one island's position and size, using the
+make_island helper from the previous cell. Reading down the list, the
+y values generally become more and more negative, meaning the islands
+are laid out as a winding path leading upward, further and further
+from the starting ground.
+
+After the list itself, a loop runs through every entry in ISLANDS,
+calls make_island for each one to actually generate its tile
+positions, and appends the results onto the same GROUND and BELOW
+lists that were started back in cells 3-4 — so by the end of this
+cell, GROUND and BELOW together describe the starting ground strip
+AND every island, combined into two single, complete lists that the
+rendering code (see Camera, below) doesn't need to treat any
+differently from each other.
+
+--------------------------------------------------------------------
+CELLS 7-9 — Decorations: make_pumpkins, make_bushes (x2)
+--------------------------------------------------------------------
+What these are for: These three cells scatter decorative objects
+(pumpkins, green bushes, and orange bushes) across the islands built
+above, purely for visual variety — none of these objects affect
+collision or gameplay.
+
+How they work: All three functions follow the same pattern, just with
+different starting positions and different spacing. Each one creates
+its own random number generator seeded with a fixed number (1334) —
+using a fixed "seed" like this means the random-looking placement is
+actually the same every single time the program runs, so decorations
+don't jump around between sessions even though "random" numbers are
+being used to place them. Each function starts by placing one decor-
+ation item on the ground near the very start of the world (at a
+specific hardcoded x position), then walks forward through the
+ISLANDS list, skipping a small random number of islands each time (a
+different random range for each decoration type, so pumpkins, green
+bushes, and orange bushes don't all appear on exactly the same
+islands), and places one item at a random tile position along the top
+of whichever island it lands on. This repeats until it's stepped past
+the end of the islands list, at which point the finished list of
+positions is returned.
+
+Note: the function in cell 9 is also named "make_bushes" — a second
+function with the exact same name as the one defined in cell 8. In
+Python, defining a function with a name that already exists simply
+replaces the old one, so after cell 9 runs, the name "make_bushes"
+only refers to the orange-bush version; this doesn't cause an error,
+but it does mean the two functions can't both be referred to by that
+name later (which isn't a problem here, since neither is called again
+after producing its one result list).
+
+The three resulting lists — PUMPKINS, BUSHES, and ORANGE_BUSHES — are
+each just a list of (x, y) positions, in the same style as GROUND and
+PLATFORMS, ready to be drawn by the Camera class.
+
+--------------------------------------------------------------------
+CELL 10 — tinted_frog(tint)
+--------------------------------------------------------------------
+What it's for: Produces a version of the frog player image recolored
+to a given color, so that other connected players (who are each
+assigned their own color by the server) can be drawn as differently-
+colored frogs on this player's screen, without needing separate frog
+image files for every possible color.
+
+How it works: A cache (a dictionary that remembers results it's
+already computed) is kept so the same color is never recolored twice
+— recoloring an image is a comparatively expensive operation, and the
+same handful of colors get requested repeatedly, every frame, for
+every other player on screen. When asked for a given tint (a
+red/green/blue triple), the function first checks whether that exact
+color has already been produced and stored in the cache; if so, it
+returns the cached image immediately. If not, it makes a copy of the
+original frog image and multiplies every pixel's color by the
+requested tint (using a special pygame drawing mode, BLEND_RGBA_MULT,
+which is a standard trick for recoloring an image while preserving its
+shading/detail), stores the result in the cache under this color for
+next time, and returns it.
+
+Why it's built this way: The comment above this function notes it's a
+temporary stand-in, expected to eventually be replaced by a proper
+system for choosing between different player sprites, rather than
+just recoloring the same one frog image.
+
+--------------------------------------------------------------------
+CLASS: Camera
+--------------------------------------------------------------------
+What it's for: The Camera is responsible for everything about
+*drawing* the current frame — deciding what part of the world is
+visible (since the world is much bigger than the screen, and the
+screen needs to scroll to follow the player), picking the right
+background image, and drawing every layer of the scene (background,
+platforms, ground, decorations, other players, and finally this
+player) in the correct order, back-to-front.
+
+Camera.__init__(self)
+    Sets up the camera's starting state: it isn't offset from the
+world at all yet (offset_x and offset_y both start at 0 — these
+represent how far the drawn scene needs to be shifted so the player
+appears centered on screen), a leftover "move_speed" value that
+doesn't currently appear to be used anywhere else in the code, and a
+starting background image (the red sky).
+
+Camera.follow(self, player)
+    Adjusts the camera's vertical offset so that the given player
+character stays centered on screen vertically, no matter how high up
+in the world they've climbed. It works by taking half the screen's
+height and subtracting the player's current y position — as the
+player's y becomes more negative (climbing higher), the offset grows,
+which is what makes the whole scene appear to scroll downward as the
+player climbs upward, keeping the player visually centered instead of
+drifting off the top of the screen. (Horizontal following is written
+directly below this as a comment but is disabled — the world doesn't
+scroll left/right, only vertically.)
+
+Camera.render_world(self, platforms, ground, below, pumpkins,
+bushes, orange_bushes, remotes=())
+    This is called once per frame and does the actual drawing of
+    everything on screen, in this order (later items are drawn on top
+    of earlier ones):
+     1. Calls "follow" (above) to update the camera's offset based on
+        where the player currently is.
+     2. Clears the screen to solid black, so no leftover pixels from
+        the previous frame linger underneath the new drawing.
+     3. Decides which background image to use based purely on the
+        player's height: below a certain point (y greater than -5000,
+        i.e. not very high up yet) it's the red sky; above that
+        threshold, it switches to the blue sky — giving the player a
+        sense of having climbed into a different "zone" the higher
+        they get.
+     4. Separately, if the player has reached a specific far-off
+        position (x at least 1600, AND y at or below -10000 — very
+        high up), the background is overridden again with the victory
+        image instead, regardless of which sky would otherwise have
+        been chosen — this is effectively how "winning" the game is
+        represented: reaching a specific point at the top of the
+        climb.
+     5. Draws whichever background image was chosen, filling the
+        whole screen.
+     6. Draws a fixed exclamation-mark marker at a specific hardcoded
+        position (1600, -10100) in world space, shifted by the camera
+        offset like everything else — this marks the location the
+        player needs to reach to win, visible once they're close.
+     7. Draws every platform, then every ground tile, then every
+        "below" tile, then every pumpkin, then every green bush, then
+        every orange bush — each one simply by looping over its list
+        of (x, y) positions and drawing the corresponding image at
+        that position shifted by the camera's current offset.
+     8. Draws every "remote" player (every other player currently
+        connected, as reported by the server) using "tinted_frog" to
+        recolor each one according to their assigned color.
+     9. Finally, draws this player's own frog image on top of
+        everything else, at their own current position (also shifted
+        by the camera offset).
+
+    Why it's built this way: Everything is drawn in a fixed
+    back-to-front order (background, then world, then other players,
+    then yourself last) because in 2D drawing, whatever is drawn most
+    recently appears "in front" — there's no separate depth/layering
+    system, so draw order alone determines what's visually on top of
+    what.
+
+--------------------------------------------------------------------
+CLASS: Player
+--------------------------------------------------------------------
+What it's for: Represents this player's own character — their
+position, how they move, and how gravity affects them. (Other,
+*remote* players are represented much more simply, just as plain data
+in a RemotePlayerState from netcode.py — they don't get their own
+Player object, since their movement is entirely dictated by the
+server, not by local physics.)
+
+Player.__init__(self, image, camera)
+    Sets up a new player at a fixed starting position (x=300, y=300),
+    with a starting horizontal speed of 10 (pixels per frame),
+    vertical velocity of 0 (not currently falling or rising), a
+    gravity strength of 0.75 (how much faster the player falls each
+    frame), a jump power of -20 (an initial upward velocity applied
+    when jumping — negative because upward is negative y), and a flag
+    tracking whether the player is currently standing on solid ground
+    (starts as False). It also stores the image to draw for this
+    player and a reference to the Camera (though the camera reference
+    doesn't currently appear to be used elsewhere on the Player
+    itself). Finally, it creates a "rect" — a rectangle matching the
+    player's current position and the size of their image — which is
+    kept up to date and used for collision checks (see
+    handle_platform_collision, below).
+
+Player.get_rect(self)
+    A small helper that builds and returns a fresh rectangle matching
+    the player's *current* x/y position and image size. This is called
+    whenever up-to-date collision information is needed, since the
+    player's stored "rect" attribute can otherwise go stale as soon as
+    x or y changes.
+
+Player.move(self, left, right, jump)
+    Updates the player's position based on which movement keys are
+    currently being held down (as determined by handle_input, further
+    down). "left" and "right" are True/False flags for whether those
+    keys are pressed; if left is pressed, the player's x decreases
+    (moves left) by their speed; if right is pressed, x increases by
+    the same amount (note that if both happen to be pressed at once,
+    both adjustments apply, mostly cancelling out). If the jump key is
+    pressed AND the player is currently standing on the ground, the
+    player's vertical velocity is set to the (negative) jump_power,
+    giving them an instant upward boost, and "on_ground" is set to
+    False, since they've now left the ground. A comment notes that
+    "self.speed" is reassigned to 10 every single call as a workaround
+    for an unresolved bug the developers ran into, related to how
+    pygame handles this value — meaning this isn't dead code that can
+    just be deleted, even though it looks redundant with the value
+    already set in __init__.
+
+Player.apply_gravity(self)
+    Simulates the effect of gravity on the player, called once per
+    frame regardless of input. The player's vertical velocity
+    increases by the "gravity" amount each frame (making them fall
+    faster and faster over time, as real gravity would), but that
+    velocity is capped at a maximum of 20 (a "terminal velocity" of
+    sorts, preventing the player from ever falling arbitrarily fast).
+    The player's y position is then updated by that velocity — this is
+    what actually moves the player downward when falling, or slows
+    down and reverses their rise after a jump, since jumping sets a
+    negative velocity that gravity then continuously counteracts.
+
+--------------------------------------------------------------------
+CELL 13 — handle_input()
+--------------------------------------------------------------------
+What it's for: Reads the current state of the keyboard and translates
+it into the simple left/right/jump flags that Player.move (above)
+expects.
+
+How it works: It asks pygame for the current pressed/not-pressed state
+of every key, then picks out specifically whether the "A" key, the "D"
+key, and the Space bar are currently held down, returning those three
+True/False values together. ("A"/"D" are commonly used in games as
+left/right movement keys, alongside or instead of arrow keys.)
+
+--------------------------------------------------------------------
+CELL 14 — SOLID_RECTS (data)
+--------------------------------------------------------------------
+What this data is: A single combined list of rectangles representing
+every solid thing in the world the player can stand on or bump into:
+one rectangle for every platform, every ground tile, and every "below"
+tile, all built from the position lists established earlier and each
+one's known tile size. This combined list is what
+handle_platform_collision (next) actually checks the player against —
+decorative items like pumpkins and bushes are deliberately left out,
+since they're purely visual and the player should be able to walk
+through them.
+
+--------------------------------------------------------------------
+CELL 15 — handle_platform_collision(player, platform_rects)
+--------------------------------------------------------------------
+What it's for: This is the function that stops the player from
+falling through the ground or platforms, and lets them stand on top of
+things — implementing solid collision.
+
+How it works: It starts by refreshing the player's rectangle to match
+their current position (since it may have moved since the last
+collision check) and assumes, until proven otherwise, that the player
+is not currently standing on anything ("on_ground" is reset to False).
+
+It then checks the player's rectangle against every single solid
+rectangle in the given list, one at a time. For each one that doesn't
+currently overlap the player at all, it's skipped immediately — there's
+nothing to resolve.
+
+For every rectangle that DOES overlap the player, the function figures
+out, in each of the four directions, exactly how much the two shapes
+are overlapping — imagine pushing the player out of the obstacle in
+each of the four possible directions (up, down, left, right) and
+measuring how far each push would need to be to fully separate them.
+The function then decides which direction actually makes the most
+sense to resolve the overlap in, using both the amount of overlap and
+the player's current vertical motion as clues:
+
+ - If the player is currently moving downward (falling) AND the
+   smallest overlap is the "top" one (meaning the player's feet have
+   just sunk into the top of this obstacle), the player is pushed back
+   up out of the obstacle by exactly that overlap amount, their
+   vertical velocity is stopped (set to 0, so they don't keep trying to
+   fall through), and they're marked as now standing on solid ground.
+   This is the ordinary "landing on top of something" case.
+
+ - Otherwise, if the player is currently moving upward (jumping) AND
+   the smallest overlap is the "bottom" one (meaning the player's head
+   has bumped into the underside of this obstacle), the player is
+   pushed back down by that overlap amount and their upward velocity
+   is stopped — this is "hitting your head on a platform while
+   jumping."
+
+ - Otherwise, the overlap must be primarily horizontal, so the player
+   is pushed back out sideways instead — to the left if the leftward
+   overlap is smaller, or to the right otherwise — which is what stops
+   the player from walking straight through the side of a platform or
+   wall of ground/below tiles.
+
+After resolving one overlap, the player's rectangle is recalculated
+(since their position may have just changed) before continuing on to
+check the remaining solid rectangles in the list — this matters
+because a player can realistically be touching more than one solid
+tile at once (for example, standing exactly on the border between two
+ground tiles), and each one needs to be checked against the player's
+up-to-date position.
+
+Once every solid rectangle has been checked, the function returns
+whether the player ended up on solid ground, which — although the
+Player object itself already tracks this as "on_ground" — is also
+handed back directly to whatever called this function, in case it's
+useful there too.
+
+Why it's built this way: Comparing all four possible overlap amounts,
+and picking whichever is smallest, is a standard, simple technique for
+2D rectangle collision that generally produces reasonable-looking
+results (landing on top of things, bumping into sides) without needing
+much more complex physics — though it can occasionally behave
+slightly oddly at sharp corners, which is a known limitation of this
+simple approach rather than a bug specific to this code.
+
+--------------------------------------------------------------------
+CELL 16 — a large commented-out block (is_Grounded) — DEAD CODE
+--------------------------------------------------------------------
+This entire cell is wrapped in triple-quotes, which in Python turns it
+into a single unused block of text rather than code that actually
+runs — effectively, it's commented out and has no effect at all when
+the notebook is run. It defines an older, alternative way of checking
+whether the player is standing on the ground (by comparing the
+player's bottom edge to nearby platform/ground positions within a
+small tolerance), which appears to have been an earlier approach later
+superseded by the overlap-based logic in
+handle_platform_collision (cell 15). It's left in the notebook,
+presumably for reference, but it is not part of the running game and
+doesn't need to be understood to understand how the game currently
+behaves — it's included here only so nobody mistakes it for active
+code while reading through the notebook.
+
+--------------------------------------------------------------------
+CELL 17 — Connecting to the multiplayer server
+--------------------------------------------------------------------
+What it's for: Establishes this player's connection to the
+multiplayer server before the actual game loop starts.
+
+How it works: Two settings are defined right at the top — the name
+this player will use ("david", hardcoded — meant to be edited per
+person running the notebook) and the address of the server to connect
+to (127.0.0.1, meaning "this same computer" — meant to be changed to
+the server's real address when playing across different machines).
+
+Then, in case this cell is being re-run after already having
+connected once before (for example, while experimenting in Jupyter,
+where cells can be re-run out of order or repeatedly), it tries to
+close any existing connection first, ignoring the specific error that
+would occur if no such connection exists yet at all (the very first
+time this cell runs). It then creates a brand new NetClient, which (as
+explained in netcode.py_explained.txt) immediately performs the full
+join handshake with the server, and prints a confirmation line showing
+the assigned player id, color, and resume position (if any).
+
+--------------------------------------------------------------------
+CELL 18 — The main game loop
+--------------------------------------------------------------------
+What it's for: This is where the game actually plays — everything
+defined in every earlier cell exists to be used here. This single
+cell runs continuously, frame after frame, until the player closes
+the window.
+
+How it works: Before the loop starts, a Camera and a Player are
+created; if the server said this player has a saved position to
+resume from (from a previous session), the player's starting position
+is overwritten with that saved position instead of the Player class's
+default starting spot. A pygame "Clock" object is also created, which
+will be used to both measure the frame rate and to limit how fast the
+loop runs.
+
+The loop then repeats the following steps every frame, for as long as
+"running" stays True:
+ 1. Checks for any pending window events (like the user clicking the
+    window's close button); if a "quit" event is seen, "running" is
+    set to False, which will end the loop after this frame finishes.
+ 2. Reads the keyboard via handle_input (cell 13) to get the current
+    left/right/jump state.
+ 3. Applies that input to the player via Player.move (moving
+    left/right and possibly starting a jump).
+ 4. Applies gravity to the player via Player.apply_gravity (pulling
+    them downward, or slowing/reversing an upward jump).
+ 5. Resolves collisions against every solid rect in the world via
+    handle_platform_collision, which may adjust the player's position
+    and stop them from moving through solid ground/platforms.
+ 6. Sends the player's now-final position to the server, and receives
+    back the latest known positions of every other connected player,
+    via NetClient.update — described fully in netcode.py_explained.txt.
+ 7. Draws the entire scene for this frame via Camera.render_world,
+    passing in the full world data (platforms, ground, below tiles,
+    decorations) and the list of other players just received from the
+    server.
+ 8. Updates the window's title bar to show the current frame rate,
+    the player's name and id, whether the connection to the server is
+    currently "online" or has gone "OFFLINE", and how many other
+    players are currently visible — useful, at-a-glance debugging
+    information while playing.
+ 9. Actually displays everything that was drawn this frame onto the
+    screen ("pygame.display.flip()").
+ 10. Waits just long enough to cap the frame rate at 60 frames per
+     second ("clock.tick(60)") — this prevents the game from running
+     faster (and therefore differently) on faster computers, and keeps
+     it from using more of the computer's processing power than
+     necessary.
+
+Once the loop ends (the player closed the window), the connection to
+the server is closed via NetClient.close, and pygame itself is shut
+down cleanly via "pygame.quit()".
+
+Why it's built this way: This is a completely standard structure for a
+real-time game: one big loop that, every single frame, in a fixed
+order, handles input, updates game logic (movement, physics, collision,
+networking), then draws the result — repeated dozens of times per
+second for as long as the game is running.
