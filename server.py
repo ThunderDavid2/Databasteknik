@@ -8,10 +8,6 @@ from netcode import (
     RemotePlayerState, RosterSnapshot, recv_msg, send_msg,
 )
 
-TINTS = [
-    (255, 255, 255), (255, 120, 120), (120, 200, 255),
-    (160, 255, 140), (255, 220, 120), (220, 150, 255),
-]
 TICK = 1 / 20
 SAVE_PATH = "players"
 AUTOSAVE = 5.0
@@ -20,19 +16,12 @@ AUTOSAVE = 5.0
 def remember(save, info):
     if info["state"] is None:
         return
-    save[info["name"]] = {"x": info["state"].x, "y": info["state"].y, "tint": list(info["tint"])}
+    save[info["name"]] = {"x": info["state"].x, "y": info["state"].y, "char": info["char"]}
 
 
-# Will be replaced with pick character sprite
-def pick_tint(save, clients, name):
+def resume_position(save, name):
     saved = save.get(name)
-    if saved is not None:
-        return tuple(saved["tint"]), (saved["x"], saved["y"])
-    taken = {info["tint"] for info in clients.values()}
-    for tint in TINTS:
-        if tint not in taken:
-            return tint, None
-    return TINTS[len(clients) % len(TINTS)], None
+    return None if saved is None else (saved["x"], saved["y"])
 
 
 def drop(save, clients, sock):
@@ -48,7 +37,7 @@ def drop(save, clients, sock):
 
 def broadcast(save, clients):
     players = [
-        RemotePlayerState(info["id"], info["name"], info["tint"],
+        RemotePlayerState(info["id"], info["name"], info["char"],
             info["state"].x, info["state"].y)
         for info in clients.values() if info["state"] is not None
     ]
@@ -73,10 +62,10 @@ def accept(save, listener, clients, next_id):
         name = join_request.name
         if any(info["name"] == name for info in clients.values()):
             name = f"{name}~{next_id}"
-        tint, resume = pick_tint(save, clients, name)
+        resume = resume_position(save, name)
 
-        send_msg(conn, JoinResponse(next_id, tint, resume))
-        clients[conn] = {"id": next_id, "name": name, "tint": tint, "state": None}
+        send_msg(conn, JoinResponse(next_id, join_request.char, resume))
+        clients[conn] = {"id": next_id, "name": name, "char": join_request.char, "state": None}
         print(
             "+ %s joined as player %d from %s (%d online)%s"
             % (name, next_id, addr[0], len(clients),

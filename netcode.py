@@ -14,15 +14,15 @@ PROTOCOL = pickle.HIGHEST_PROTOCOL
 
 class JoinRequest:
 
-    def __init__(self, name):
-        self.name = name
+    def __init__(self, name, char):
+        self.name, self.char = name, char
 
 
 
 
 class JoinResponse:
-    def __init__(self, pid, tint, resume=None):
-        self.pid, self.tint, self.resume = pid, tint, resume
+    def __init__(self, pid, char, resume=None):
+        self.pid, self.char, self.resume = pid, char, resume
 
 
 
@@ -36,8 +36,8 @@ class PlayerState:
 
 class RemotePlayerState:
 
-    def __init__(self, pid, name, tint, x, y):
-        self.pid, self.name, self.tint, self.x, self.y = pid, name, tint, x, y
+    def __init__(self, pid, name, char, x, y):
+        self.pid, self.name, self.char, self.x, self.y = pid, name, char, x, y
 
 
 class RosterSnapshot:
@@ -106,18 +106,18 @@ class NetClient:
 
     SEND_HZ = 20
 
-    def __init__(self, host, name, port=PORT):
+    def __init__(self, host, name, char, port=PORT):
         self.sock = socket.create_connection((host, port), timeout=5)
         self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
-        send_msg(self.sock, JoinRequest(name))
+        send_msg(self.sock, JoinRequest(name, char))
         join_response = recv_msg(self.sock)
         if not isinstance(join_response, JoinResponse):
             self.sock.close()
             raise ConnectionError(f"expected a valid JoinResponse, got {join_response!r}")
 
         self.my_id = join_response.pid
-        self.tint = tuple(join_response.tint)
+        self.char = join_response.char
         self.resume = join_response.resume
         self.sock.settimeout(None)
         self.connected = True
