@@ -17,6 +17,7 @@ def remember(save, info):
     if info["state"] is None:
         return
     save[info["name"]] = {"x": info["state"].x, "y": info["state"].y, "char": info["char"]}
+    
 
 
 def resume_position(save, name):
