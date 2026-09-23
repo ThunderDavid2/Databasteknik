@@ -8,16 +8,12 @@ import time
 
 PORT = 50007
 HEADER = struct.Struct("!I")
-MAX_MSG = 64 * 1024
 PROTOCOL = pickle.HIGHEST_PROTOCOL
 
 
 class JoinRequest:
-
     def __init__(self, name, char):
         self.name, self.char = name, char
-
-
 
 
 class JoinResponse:
@@ -25,27 +21,19 @@ class JoinResponse:
         self.pid, self.char, self.resume = pid, char, resume
 
 
-
 class PlayerState:
-
     def __init__(self, x, y):
         self.x, self.y = x, y
 
 
-
-
 class RemotePlayerState:
-
     def __init__(self, pid, name, char, x, y):
         self.pid, self.name, self.char, self.x, self.y = pid, name, char, x, y
 
 
 class RosterSnapshot:
-
     def __init__(self, players):
         self.players = players
-
-
 
 
 ALLOWED = {
@@ -62,7 +50,6 @@ class ProtocolError(Exception):
 
 
 class SafeUnpickler(pickle.Unpickler):
-
     def find_class(self, module, name):
         if (module, name) not in ALLOWED:
             raise pickle.UnpicklingError(f"refusing to load {module}.{name}")
@@ -81,8 +68,6 @@ def recv_exact(sock, n):
 
 def send_msg(sock, obj):
     payload = pickle.dumps(obj, protocol=PROTOCOL)
-    if len(payload) > MAX_MSG:
-        raise ValueError(f"message too large to send: {len(payload)} bytes")
     sock.sendall(HEADER.pack(len(payload)) + payload)
 
 
@@ -91,8 +76,6 @@ def recv_msg(sock):
     if header is None:
         return None
     (length,) = HEADER.unpack(header)
-    if length > MAX_MSG:
-        raise ProtocolError(f"refusing {length}-byte message")
     payload = recv_exact(sock, length)
     if payload is None:
         return None
@@ -112,9 +95,6 @@ class NetClient:
 
         send_msg(self.sock, JoinRequest(name, char))
         join_response = recv_msg(self.sock)
-        if not isinstance(join_response, JoinResponse):
-            self.sock.close()
-            raise ConnectionError(f"expected a valid JoinResponse, got {join_response!r}")
 
         self.my_id = join_response.pid
         self.char = join_response.char
@@ -152,8 +132,7 @@ class NetClient:
                 self._die()
                 return
             if isinstance(msg, RosterSnapshot):
-                self.remotes = [p for p in msg.players
-                                if p.pid != self.my_id]
+                self.remotes = [p for p in msg.players if p.pid != self.my_id]
 
     def _die(self):
         self.connected = False

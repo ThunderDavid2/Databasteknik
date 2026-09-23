@@ -34,6 +34,13 @@ A few networking terms used throughout this explanation:
 MODULE-LEVEL SETTINGS (the constants at the top of the file)
 --------------------------------------------------------------------
 
+A note on the imports: near the top of the file, "import math" pulls in
+Python's math library, but nothing in this file actually uses it
+anywhere — it appears to be an unused leftover from earlier work, the
+same way the notebook has a couple of imports it never ends up using
+(see SpelLokalt.ipynb_explained.txt). It's harmless, just not doing
+anything.
+
 PORT
     50007. The fixed network port number the server listens on and
     every client connects to. Both server.py and this file's NetClient
@@ -44,11 +51,6 @@ HEADER
     byte order." This is used to describe, in advance, how long the
     *next* message is going to be — see recv_msg/send_msg below for
     why that matters.
-
-MAX_MSG
-    64 * 1024 = 65536 bytes (64 "kibibytes"). The largest message
-    this system will ever send or accept. This exists as a safety
-    limit — see send_msg and recv_msg.
 
 PROTOCOL
     The most efficient/modern version of Python's pickle format that
@@ -76,28 +78,36 @@ other. None of them have any special methods (behavior); each one's
 attributes on itself, so that the *receiving* side can read those
 attributes back out. Here's what each one carries and when it's used:
 
-JoinRequest(name)
+JoinRequest(name, char)
     Sent by a client to the server the moment it connects, to say
-    "hello, I'd like to join, and the name I'd like to use is ...".
+    "hello, I'd like to join, my name is ..., and the character sprite
+    I've picked is number ...". "char" is a number (see
+    SpelLokalt.ipynb_explained.txt's pick_character) identifying which
+    of the game's pre-drawn character images this player chose to look
+    like — it is chosen by the player before connecting, not assigned
+    by the server.
 
-JoinResponse(pid, tint, resume=None)
+JoinResponse(pid, char, resume=None)
     Sent by the server back to a client immediately after a
     JoinRequest, to say "you're in — here's the id number
-    (pid = "player id") I've assigned you, here's the color (tint)
-    you'll appear as, and (if you've played before) here's the
-    position you should resume at." "resume" defaults to nothing
-    (None) for a brand-new player who has no saved position.
+    (pid = "player id") I've assigned you, here's your character
+    number (char) echoed back, and (if you've played before) here's
+    the position you should resume at." "resume" defaults to nothing
+    (None) for a brand-new player who has no saved position. (In an
+    earlier version of this project, this second field held an
+    assigned color instead of a chosen character — see
+    server.py_explained.txt for how character selection works now.)
 
 PlayerState(x, y)
     Sent repeatedly by a client to the server, roughly 20 times per
     second, to say "I am now at this x/y position." This is how the
     server finds out where each player is moving to.
 
-RemotePlayerState(pid, name, tint, x, y)
+RemotePlayerState(pid, name, char, x, y)
     Used inside a RosterSnapshot (below) to describe one *other*
     player, from a given client's point of view — their id, name,
-    color, and current position, so that client can draw them on
-    screen.
+    chosen character number, and current position, so that client can
+    draw them on screen as the right sprite.
 
 RosterSnapshot(players)
     Sent repeatedly by the server to every client, roughly 20 times
@@ -110,8 +120,9 @@ ProtocolError
 --------------------------------------------------------------------
 A custom kind of error (an "Exception") defined specifically for this
 file. It's raised whenever something arrives over the network that
-doesn't make sense as a valid message — for example, a message that's
-too large, or one that can't be decoded at all. Having its own
+doesn't make sense as a valid message — for example, corrupted data,
+or an attempt to reconstruct a type of object that isn't on the
+ALLOWED list. Having its own
 specific error type (rather than reusing a generic one) makes it easy
 for the code that calls into this file to specifically catch and
 handle "the network said something we don't understand," separately
@@ -176,13 +187,19 @@ What it's for: Sends any one of the message objects described earlier
 other side can reliably read back as one complete message.
 
 How it works: It first converts the given object into raw bytes using
-pickle. If the result is larger than the MAX_MSG safety limit (64 KB),
-it deliberately refuses to send it at all, raising an error instead —
-this protects both sides from ever dealing with an unreasonably huge
-message. Otherwise, it sends a small fixed-size header first (4 bytes,
+pickle. It then sends a small fixed-size header first (4 bytes,
 containing the exact length of the message that's about to follow),
 immediately followed by the message's bytes themselves, in a single
 network send call.
+
+Note: there is currently no upper limit on how large a message is
+allowed to be — earlier versions of this file capped messages at 64 KB
+and rejected anything bigger, but that safety check has since been
+removed. In practice the messages this project actually sends (a join
+request, one player's x/y position, or a snapshot of everyone's
+positions) are always small, so this isn't a problem in normal use, but
+it does mean a sender is no longer stopped from constructing and
+sending an enormous message if something ever went wrong upstream.
 
 Why it's built this way: TCP only guarantees that bytes arrive in
 order — it does not, on its own, tell the receiver where one message
@@ -203,12 +220,12 @@ the header that send_msg always sends first, which tells it how many
 bytes the actual message will be. If those 4 header bytes never
 arrive at all (the connection closed before sending anything), the
 function returns "nothing" (None), signaling "there was no message —
-the connection appears to be gone." If a length was successfully read
-but it's larger than MAX_MSG, that's treated as a protocol violation
-and an error is raised immediately, without even trying to read that
-much data — a defense against a corrupted or hostile sender claiming
-an enormous message size. Otherwise, it reads exactly that many bytes
-(again using recv_exact) to get the message body itself. Finally, it
+the connection appears to be gone." Otherwise, it reads exactly that
+many bytes (again using recv_exact) to get the message body itself,
+whatever the length header said — there's no upper limit checked here
+either (see the note under send_msg above), so a sender claiming an
+enormous message size would currently just make this function try to
+read that much. Finally, it
 runs those bytes through SafeUnpickler (described above) to reconstruct
 the original object; if that step fails for any reason — corrupted
 data, or an attempt to sneak in a disallowed type of object — it's
@@ -235,7 +252,7 @@ repeatedly call ".update(x, y)" once per frame, and read back the list
 of other players from what it returns.
 
 --------------------------------------------------------------------
-NetClient.__init__(self, host, name, port=PORT)
+NetClient.__init__(self, host, name, char, port=PORT)
 --------------------------------------------------------------------
 What it's for: Creates a brand-new connection to the server and
 performs the initial "joining" handshake, so that by the time this
@@ -248,23 +265,38 @@ address ("host") and port (defaulting to the game's standard port,
 seconds. It enables the same "send small messages immediately, don't
 delay them" network setting that the server also uses, for
 responsiveness. It then immediately sends a JoinRequest containing the
-desired player name, and waits for a reply. If what comes back isn't
-actually a proper JoinResponse (for example, if the server rejected
-the connection or sent something unexpected), the connection is closed
-immediately and an error is raised — since without a valid response
-there's no way to proceed.
+desired player name and the "char" number the player picked for
+themselves (see SpelLokalt.ipynb_explained.txt — the notebook asks the
+player to choose a character sprite before connecting), and waits for
+a reply.
+
+Note: unlike some earlier versions of this code, there is currently no
+check here that the reply actually is a JoinResponse. Whatever comes
+back from recv_msg is simply trusted and its fields are read straight
+off it below. If the server ever sent back some other kind of message,
+or if recv_msg raised a ProtocolError, this constructor would not
+handle it specially — a ProtocolError would propagate straight out to
+whoever tried to create the NetClient, and reading ".pid" off some
+other object type would raise an AttributeError instead of a clear
+"join failed" error. In normal operation the server only ever replies
+to a JoinRequest with a JoinResponse, so this doesn't come up in
+practice, but it means a broken or hostile server isn't guarded
+against as gracefully here as incoming messages are guarded against
+elsewhere (see SafeUnpickler, above).
 
 Assuming a valid response was received, several pieces of information
 from it are stored on the client for later use: the id number the
-server assigned this player, the color it should appear as, and (if
-returning to a previous session) the position it should resume at. The
-5-second connection timeout is then removed (ordinary gameplay
-shouldn't have any such limit), the client is marked as
-successfully connected, and two more pieces of internal state are set
-up: an empty list to hold information about other players (filled in
-later, once the server starts sending updates), and a record of when a
-position was last sent (used by _send, below, to control how often
-updates go out).
+server assigned this player, the character number it echoed back
+(self.char — normally identical to the "char" this constructor was
+given, since the server currently just hands it back unchanged; see
+server.py_explained.txt), and (if returning to a previous session) the
+position it should resume at. The 5-second connection timeout is then
+removed (ordinary gameplay shouldn't have any such limit), the client
+is marked as successfully connected, and two more pieces of internal
+state are set up: an empty list to hold information about other
+players (filled in later, once the server starts sending updates), and
+a record of when a position was last sent (used by _send, below, to
+control how often updates go out).
 
 --------------------------------------------------------------------
 NetClient.update(self, x, y)

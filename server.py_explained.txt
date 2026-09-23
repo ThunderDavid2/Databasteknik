@@ -16,17 +16,32 @@ network plumbing (opening connections, sending and receiving messages)
 and the definitions of what a "message" can contain (e.g. "here is a
 player's position"). Think of netcode.py as the postal service, and
 this file (server.py) as the office that decides what to write in the
-letters and what to do with the letters it receives.
+letters and what to do with the letters it receives. See
+netcode.py_explained.txt for what a "socket" and "TCP" are; this file's
+own main loop (below) additionally relies on a tool called "select",
+explained where it's used.
+
+A note on "select": a server with many players connected at once has
+many open sockets (one "listener" socket that's always waiting for
+brand-new players, plus one socket per already-connected player), and
+at any given moment it doesn't know which of them, if any, currently
+has something to read. It could check each one in turn by trying to
+read from it and seeing if anything's there, over and over in a tight
+loop — but that would either waste huge amounts of CPU time
+constantly re-checking sockets with nothing to say, or introduce lag
+if it only checked occasionally. Python's "select.select(...)" is a
+single call that solves this: you hand it a list of sockets you care
+about, and it goes to sleep — using essentially no CPU time at all —
+until at least one of them actually has something ready to read (or
+until an optional timeout runs out, whichever comes first), then
+returns exactly which ones are ready. It's the mechanism that lets
+this server sit idle, using no CPU, right up until there's genuinely
+something to do — a new connection, an incoming message, or the next
+scheduled tick.
 
 --------------------------------------------------------------------
 MODULE-LEVEL SETTINGS (the constants at the top of the file)
 --------------------------------------------------------------------
-
-TINTS
-    A fixed list of 6 colors (as red/green/blue number triples). These
-    are handed out to players so that everyone's frog character can be
-    told apart on screen. There are only 6, so if more than 6 players
-    are online at once, colors start being reused.
 
 TICK
     1/20th of a second. This is how often the server sends everyone an
@@ -51,8 +66,19 @@ works like a simple dictionary (a lookup table of key → value pairs)
 but one that is automatically saved to a file on disk, so its contents
 survive after the program closes and can be loaded again next time.
 This server uses it to remember, for each player name, their last
-known position and color, so a player who reconnects later resumes
-where they left off instead of restarting from scratch.
+known position and character sprite, so a player who reconnects later
+resumes where they left off instead of restarting from scratch.
+
+A note on player "char": each player now picks their own character
+sprite in the game itself (see pick_character in
+SpelLokalt.ipynb_explained.txt) and sends that choice to the server as
+part of their JoinRequest (see netcode.py_explained.txt). The server
+doesn't assign or validate this value in any way — it just stores
+whatever number the client sent, and hands it back to every other
+player so they know which sprite to draw. An earlier version of this
+server used to assign each player a color itself, from a fixed list,
+but that logic has since been removed entirely now that players choose
+their own look.
 
 ====================================================================
 FUNCTIONS
@@ -61,20 +87,25 @@ FUNCTIONS
 --------------------------------------------------------------------
 remember(save, info)
 --------------------------------------------------------------------
-What it's for: Saves one player's current position and color into the
-long-term save file, so it isn't lost if they disconnect or the server
-restarts.
+What it's for: Saves one player's current position and chosen
+character sprite into the long-term save file, so it isn't lost if
+they disconnect or the server restarts.
 
 How it works: "info" is the server's internal record for one connected
-player (their id number, name, color, and current position). This
-function first checks whether the player has actually sent a position
-yet at all — if they only just connected and haven't moved yet, there
-is nothing to save, so the function does nothing and returns
-immediately. Otherwise, it writes an entry into the save file, keyed by
-the player's name, containing their x and y coordinates and their
-color. Because the save file behaves like a dictionary, writing to
+player (their id number, name, chosen character, and current
+position). This function first checks whether the player has actually
+sent a position yet at all — if they only just connected and haven't
+moved yet, there is nothing to save, so the function does nothing and
+returns immediately. Otherwise, it writes an entry into the save file,
+keyed by the player's name, containing their x and y coordinates and
+their character number. Because the save file behaves like a
+dictionary, writing to
 save[name] either creates a brand new entry for a name never seen
-before, or overwrites the old entry for a returning player.
+before, or overwrites the old entry for a returning player. (The
+"char" value saved here is whatever character number that player was
+using — see the note above the FUNCTIONS section — so a returning
+player's saved-and-resumed position stays paired with their
+last-used character, not the color-based system this used to be.)
 
 Why it's built this way: Saving is keyed by player *name*, not by
 their id number, because id numbers are only valid for the current
@@ -83,37 +114,28 @@ server session (they're handed out fresh every time someone connects)
 sessions, possibly days apart.
 
 --------------------------------------------------------------------
-pick_tint(save, clients, name)
+resume_position(save, name)
 --------------------------------------------------------------------
-What it's for: Decides what color a newly-connecting player's frog
-should be, and whether they should resume from a previously-saved
-position.
+What it's for: Looks up whether a given player name has a previously-
+saved position, so a returning player can pick up where they left off
+instead of starting from the game's default spawn point.
 
-How it works: First, it checks the save file to see if this player
-name has been seen before. If it has, the function immediately returns
-that player's previously-saved color and their previously-saved
-x/y position as a pair — this is what makes a returning player "pick up
-where they left off."
+How it works: It checks the save file (the same "save" dictionary-like
+object described above, under "shelve") for an entry matching this
+player's name. If there isn't one — either because this is a brand-new
+player, or because this player has connected before but never sent a
+single position update (see "remember", which only saves a player who
+has an actual position to record) — it returns "nothing" (None). If
+there is a saved entry, it returns just the x/y position out of it, as
+a pair, discarding the character number that's also stored alongside
+it in the save file (the character comes back to the player separately,
+from their own JoinRequest — see the note above the FUNCTIONS section,
+and "accept" below).
 
-If the name has never been saved before (a brand new player), the
-function instead looks at everyone who is *currently* online right
-now, collects the set of colors already in use among them, and walks
-through the fixed TINTS list looking for the first color nobody
-currently online is using. If it finds one, it returns that free
-color, along with "no saved position" (since this player has no
-history yet, they'll start at whatever default position the game
-client uses).
-
-If every single color in the TINTS list is already taken by someone
-currently online (which only becomes possible once more than 6 people
-are connected at the same time), the function falls back to just
-picking a color based on how many people are currently connected,
-which means colors start being reused among simultaneous players.
-
-Why it's built this way: The comment in the code above this function
-calls it temporary, noting it will eventually be replaced by a proper
-"pick your own character sprite" feature — for now it's a simple
-stand-in so different players are at least visually distinguishable.
+Why it's built this way: This is deliberately a small, single-purpose
+lookup — "accept" (below) is the only place that calls it, right when
+deciding what to tell a newly-connecting player about their previous
+session.
 
 --------------------------------------------------------------------
 drop(save, clients, sock)
@@ -130,11 +152,25 @@ function being called on a connection that was never fully
 registered), it saves their final position to disk using "remember"
 (described above) and prints a line to the server's console log saying
 who left and how many people remain online. Finally, it closes the
-underlying network connection. Closing a connection can sometimes
-raise a network-level error if the connection was already broken in
-some way — that specific kind of error is deliberately ignored here,
-since the goal (the connection being closed) is already achieved
-either way.
+underlying network connection.
+
+⚠ Currently disabled safety net: closing a connection can sometimes
+raise a network-level error (OSError) if the connection was already
+broken in some way — for example, if the other side vanished abruptly
+rather than closing cleanly. In the code, you can see the lines meant
+to guard against that sitting right there as comments:
+    # try:
+    sock.close()
+    # except OSError:
+    #     pass
+Because "# try:" and "# except ...:" are just comments (the "#" makes
+them plain text to Python, not real code), there is no actual
+try/except here right now — it's just a bare "sock.close()" call. If
+closing ever does raise an OSError in this state, "drop" itself will
+raise that error outward to whatever called it, instead of quietly
+swallowing it as the comments describe. See the "⚠ Error handling is
+currently switched off" section further down for why this matters and
+where else it shows up.
 
 --------------------------------------------------------------------
 broadcast(save, clients)
@@ -147,17 +183,29 @@ How it works: The function builds one combined list describing every
 player who has sent at least one position update so far (players who
 just joined and haven't moved yet are left out, since there's nothing
 useful to say about them yet). Each entry in that list records a
-player's id, name, color, and current x/y position. This combined list
-is then wrapped up into a single message (a "RosterSnapshot" — see
-netcode.py_explained.txt for what that is) and sent to every currently
-connected player, one at a time, over their individual network
-connection.
+player's id, name, chosen character, and current x/y position. This
+combined list is then wrapped up into a single message (a
+"RosterSnapshot" — see netcode.py_explained.txt for what that is) and
+sent to every currently connected player, one at a time, over their
+individual network connection.
 
-If sending to a particular player fails (for example, because their
-connection has quietly broken without the server noticing yet), that
-specific player is treated as disconnected: they're removed via
-"drop" and everyone else's broadcast simply continues — one broken
-connection doesn't stop the update from reaching everybody else.
+⚠ Currently disabled safety net: sending to a particular player can
+fail (for example, because their connection has quietly broken without
+the server noticing yet) — send_msg can raise an OSError (a
+network-level failure) or a ValueError (pickle refusing to encode
+something). The code still shows what's *supposed* to happen in that
+case, as comments:
+    # try:
+    send_msg(sock, payload)
+    # except (OSError, ValueError):
+    #     drop(save, clients, sock)
+but since those are just comments and not real code right now, there
+is no actual try/except here — it's a bare call to send_msg. If
+sending to any one player fails, that failure is not caught: it
+propagates straight out of "broadcast" (skipping the rest of the
+players still waiting for this update) and, from there, out of the
+main loop entirely — see the "⚠ Error handling is currently switched
+off" section under main() for what happens next.
 
 Why it's built this way: The list of currently-connected sockets is
 copied before looping over it ("list(clients)") because the loop body
@@ -169,10 +217,9 @@ would cause errors or skipped entries.
 accept(save, listener, clients, next_id)
 --------------------------------------------------------------------
 What it's for: Runs once every time a new player tries to connect to
-the server. It's the "bouncer at the door" — it figures out who this
-new player is, gives them a color and a starting position, and either
-lets them into the game or turns them away if something about their
-connection looks wrong.
+the server. It's the "front desk" — it figures out who this new player
+is, works out their starting position, and registers them so the rest
+of the server starts tracking them.
 
 How it works: The function starts by accepting the raw incoming
 network connection from the "listener" (the socket that's always
@@ -180,13 +227,7 @@ waiting for new players to show up). Accepting it gives us two things:
 a new dedicated connection just for this player ("conn"), and their
 network address ("addr"), which is only used for the log messages.
 
-Because a brand-new connection could belong to a broken or malicious
-client, everything from here on happens inside a "try/except" block —
-a way of saying "attempt the following steps, but if any of them fail,
-skip straight to the recovery code below instead of crashing the whole
-program."
-
-First, the connection is configured: a network-level setting is turned
+The connection is then configured: a network-level setting is turned
 on so that small messages get sent immediately instead of being
 delayed and bundled together (this matters for a real-time game —
 every fraction of a second counts for smooth movement), and a
@@ -194,73 +235,93 @@ every fraction of a second counts for smooth movement), and a
 there without sending anything, the server won't wait on it forever.
 
 The server then waits to receive the very first message this player
-sends, which is expected to be a "join request" — basically the player
-introducing themselves with a name they'd like to use. If what arrives
-isn't a proper join request (for example garbled data, or some other
-kind of message entirely), the code deliberately treats this as an
-error, which is caught further down and handled as a rejected
-connection. If a valid join request WAS received, the 5-second timer
-is removed, because from this point on the server is happy to wait
-indefinitely for messages from this player during normal play (a
-connected player might legitimately stand still for a long time).
+sends, which is expected to be a "join request" — the player
+introducing themselves with the name and character sprite (see
+netcode.py_explained.txt's JoinRequest, and pick_character in
+SpelLokalt.ipynb_explained.txt) they've already chosen on their end.
+Once it arrives, the 5-second timer is removed, because from this
+point on the server is happy to wait indefinitely for messages from
+this player during normal play (a connected player might legitimately
+stand still for a long time).
 
-Next, the server decides on the player's final display name. It
-checks whether anyone currently online is already using the name this
-player asked for; if so, it makes the new name unique by adding a "~"
-followed by the new player's id number (e.g. "alice" becomes
-"alice~7"), so two players are never confused with each other on
-screen or in the save file.
+The server takes the name straight from the join request — as written
+in the code today, there is no check here for whether that name is
+already being used by someone else currently online, and no
+"alice~7"-style renaming to keep duplicates apart. Two players
+connecting with the same name will both be tracked under that same
+name, which also means they'll share one entry in the save file (see
+"remember"), each overwriting the other's saved position. (An earlier
+version of this function did include exactly this kind of
+duplicate-name check; that logic is no longer present.)
 
-Then the server decides the player's color and starting position by
-calling the "pick_tint" helper function described above. If this
-player has connected before under this name, their previously-saved
-color and position are reused, so they resume where they left off. If
-not, they're handed a fresh, currently-unused color.
+Next, the server looks up whether this name has a saved position from
+a previous session, using "resume_position" (above) — if so, that
+position will be sent back to the player so they resume where they
+left off; if not, "resume" is None and the player will start at
+whatever default spawn position the game client itself uses.
 
-With all of that decided, the server sends a response back to the
-player containing their assigned id number, their color, and (if
-they're resuming a past session) their saved position. The player is
-then added to the "clients" dictionary — the central record the rest
-of the server uses to track everyone currently connected — storing
-their id, name, color, and a placeholder (empty) position, which will
-be filled in as soon as they start sending their own movement updates.
-A line is printed to the server's console log announcing the new
-player, and the function returns the *next* available id number, so
-whoever connects after this player gets a fresh id nobody has used
-before.
+With that decided, the server sends a JoinResponse back to the player
+containing their assigned id number, their own character number
+echoed straight back to them (join_request.char — the server neither
+questions nor changes what the client asked for), and their resume
+position, if any. The player is then added to the "clients"
+dictionary — the central record the rest of the server uses to track
+everyone currently connected — storing their id, name, character, and
+a placeholder (empty) position, which will be filled in as soon as
+they start sending their own movement updates. A line is printed to
+the server's console log announcing the new player, and the function
+returns the *next* available id number, so whoever connects after this
+player gets a fresh id nobody has used before.
 
-If anything went wrong anywhere in that process — the connection
-dropped, the message was invalid, the 5-second wait timed out — the
-"except" part of the code takes over instead: it prints a rejection
-message to the console, removes any partial record of this player from
-the clients dictionary (in case one was created before the failure),
-closes the connection, and returns the id number completely unchanged,
-since this failed attempt never actually used one.
+⚠ Currently disabled safety net: none of the above is actually wrapped
+in error handling right now, even though the shape of one is still
+visible in the code as comments:
+    # try:
+    ... (all of the steps above) ...
+    return next_id + 1
+    # except (OSError, ProtocolError, ValueError) as e:
+    #     print("  rejected %s: %s" % (addr[0], e), flush=True)
+    #     clients.pop(conn, None)
+    #     conn.close()
+    #     return next_id
+Because the "# try:" and "# except ...:" lines are just comments, this
+function currently has no actual try/except at all — it's one
+straight-line sequence of steps with no recovery path. If a newly-
+connecting client sends garbage instead of a proper join request, sits
+past the 5-second timeout without sending anything, or disconnects
+mid-handshake, recv_msg (or the socket operations around it) will
+raise an exception that "accept" does not catch. That exception
+propagates straight out to whoever called "accept" — which is the main
+loop in main() — with no rejection message printed and no cleanup of
+a half-registered client. See "⚠ Error handling is currently switched
+off" under main(), below, for what happens from there.
 
 Quick summary:
  - Accept the incoming connection.
  - Wait (up to 5 seconds) for the player to introduce themselves.
- - Make sure their chosen name isn't already taken; adjust it if it is.
- - Look up or assign their color and starting position.
+ - Look up their saved position, if any (their name is used as-is,
+   with no duplicate-name protection).
  - Send that information back to the player and register them.
  - Log the join, and hand back the next available id for future players.
- - If any step fails, log a rejection, clean up, and don't consume an id.
+ - (Currently: any failure in the steps above is not caught, and
+   crashes out of this function instead of rejecting the connection
+   cleanly.)
 
-Why it's built this way: The id counter only advances on a successful
-join, so a rejected connection attempt never "wastes" a number. Since
-the name-uniqueness suffix uses the id that this same function is
-about to assign, the "~" suffix on a name always matches the actual id
-the server gave that player, not some unrelated counter.
+Why it's built this way: The id counter only advances after every step
+above has run without raising — so today, a connection that fails
+partway through doesn't just skip a number, it stops the whole
+function (and, currently, the whole server) rather than being isolated
+to just that one player.
 
 --------------------------------------------------------------------
 main()
 --------------------------------------------------------------------
 What it's for: This is the entry point of the whole server — the
 function that actually starts everything up and keeps it running until
-the server is shut down. Everything above this (remember, pick_tint,
-drop, broadcast, accept) exists to be *used* by main; main is where the
-server's continuous loop of "wait for something to happen, react to
-it" actually lives.
+the server is shut down. Everything above this (remember,
+resume_position, drop, broadcast, accept) exists to be *used* by main;
+main is where the server's continuous loop of "wait for something to
+happen, react to it" actually lives.
 
 How it works: It begins by creating the "listener" — the socket that
 will sit and wait for new players to try to connect. A setting is
@@ -280,25 +341,53 @@ two "alarm clock" style timestamps — one for when the next broadcast
 tick should happen, and one for when the next autosave should happen.
 
 The server then enters its main loop, which repeats forever until it's
-manually stopped. Each time around the loop, it uses a system feature
-called "select" to efficiently wait until either (a) a new player is
-trying to connect, (b) an already-connected player has sent a message,
-or (c) it's time for the next tick — whichever comes first. This is
-far more efficient than constantly checking each connection in a
-tight loop with no waiting, because the program can sleep until there
+manually stopped. Each time around the loop, it first works out how
+long it can afford to sleep before the next scheduled tick is due
+("timeout = max(0.0, next_tick - time.monotonic())" — "time.monotonic()"
+is the current time from a clock that only ever moves forward, unaffected
+by the system clock being adjusted, which makes it the right choice for
+measuring "how long until X" rather than "what's the wall-clock time";
+subtracting the current time from the next tick's scheduled time gives
+how many seconds remain, and "max(0.0, ...)" makes sure that, if a tick
+is already overdue, the wait requested is zero rather than negative).
+It then calls "select.select([listener] + list(clients), [], [], timeout)"
+— handing select the listener socket plus every currently-connected
+player's socket as "the sockets to watch for incoming data," two empty
+lists (this server never needs to watch for a socket becoming ready to
+*write* to, or for an "exceptional condition," so those are left
+unused), and the timeout just computed. This one call efficiently waits
+until either (a) a new player is trying to connect, (b) an already-
+connected player has sent a message, or (c) the timeout runs out
+because it's time for the next tick — whichever comes first. The
+sockets that actually have something ready are returned as "readable";
+this is far more efficient than constantly checking each connection in
+a tight loop with no waiting, because the program can sleep until there
 is actually something to do.
 
-For each connection that has something ready to read: if it's the
-listener itself, that means a brand-new player is trying to connect,
-so "accept" is called to handle the handshake, and the id counter is
-updated with whatever it returns. Otherwise, it's an existing player
-sending a message — the server tries to read it; if reading fails for
-any reason, or if what comes back is empty (meaning the connection
-was closed on the other end), the player is treated as having
-disconnected and "drop" is called for them. If a valid message did
-come through and it turns out to be a position update (the player
-saying "I am now at this x/y"), that becomes their new stored
-position.
+For each connection in "readable": if it's the listener itself, that
+means a brand-new player is trying to connect, so "accept" is called
+to handle the handshake, and the id counter is updated with whatever it
+returns. Otherwise, it's an existing player sending a message — the
+server calls recv_msg to read it.
+
+⚠ Currently disabled safety net: as with accept(), drop(), and
+broadcast() above, the code here still shows the shape of error
+handling as comments, but it isn't actually active:
+    # try:
+    msg = recv_msg(sock)
+    # except (OSError, ProtocolError):
+    #     msg = None
+Right now it's just a bare "msg = recv_msg(sock)". recv_msg returning
+None (meaning the connection was closed cleanly on the other end) is
+still handled correctly — that player is treated as having
+disconnected and "drop" is called for them. But if recv_msg instead
+*raises* an exception — an OSError from a broken connection, or a
+ProtocolError from a corrupted or malicious message — that exception
+is no longer caught here at all; it propagates straight out of the
+main loop. See "⚠ Error handling is currently switched off" below.
+If a valid message did come through and it turns out to be a position
+update (the player saying "I am now at this x/y"), that becomes their
+new stored position.
 
 After handling every connection that had something ready, the loop
 checks whether enough time has passed to run the next scheduled tick;
@@ -312,23 +401,37 @@ The loop keeps repeating this cycle indefinitely. If the person
 running the server presses Ctrl-C, that interrupt is specifically
 caught and treated as a normal, deliberate shutdown request rather
 than a crash — a friendly "shutting down" message is printed instead
-of an error. Regardless of how the loop ends (a clean Ctrl-C, or any
-other unexpected error), a final cleanup section always runs: every
-still-connected player's position is saved one last time, the save
-file is properly closed, and the listener socket is closed too.
+of an error. Regardless of how the loop ends — a clean Ctrl-C, or any
+other exception escaping the loop — a final "finally" cleanup section
+always runs: every still-connected player's position is saved one last
+time, the save file is properly closed, and the listener socket is
+closed too.
+
+Importantly, that "finally" block only guarantees *cleanup* runs — it
+does not stop an exception from continuing on afterwards. The
+"except" here only catches KeyboardInterrupt (Ctrl-C); any other
+exception (which, given the note below, is currently a real
+possibility) is not caught by anything in main(), so after "finally"
+finishes saving and closing everything, Python re-raises that same
+exception, which is not caught anywhere further up either (main() is
+called directly from the bottom of the file — see below) — so the
+whole server process crashes and exits, printing a normal Python error
+traceback, and every connected player is disconnected. Nothing here
+automatically restarts the server.
 
 Quick summary:
  - Set up the listener socket on the game's fixed port.
  - Open the save file and set up empty tracking state.
  - Loop forever:
     - Efficiently wait for new connections, incoming messages, or the
-      next scheduled tick — whichever happens first.
+      next scheduled tick — whichever happens first (via select).
     - Accept new connections, or read and apply messages from existing
-      players (dropping anyone whose connection has failed).
+      players.
     - If it's time, broadcast everyone's positions to everyone.
     - If it's time, autosave everyone's positions to disk.
- - On Ctrl-C (or any other exit), save everyone one final time and
-   close everything down cleanly.
+ - On Ctrl-C, or on any other error, save everyone one final time and
+   close the save file and listener socket — then, unless it was
+   Ctrl-C, let the error crash the process.
 
 Why it's built this way: Using "select" instead of one thread per
 player keeps the whole server single-threaded and simple, which avoids
@@ -337,7 +440,43 @@ data at the same time — appropriate for a small game server that isn't
 expecting huge numbers of simultaneous players. The "finally" block at
 the very end guarantees data gets saved and sockets get closed even if
 something goes wrong partway through, rather than only on the "happy
-path."
+path" — though, as covered next, it doesn't currently prevent the
+crash itself.
+
+--------------------------------------------------------------------
+⚠ Error handling is currently switched off — read this
+--------------------------------------------------------------------
+Across drop(), broadcast(), accept(), and this per-message read inside
+main(), the code contains four separate blocks of the pattern:
+    # try:
+    <the risky operation>
+    # except SomeError:
+    #     <recovery code>
+In every one of these, the "try:" and "except ...:" lines are written
+as comments (starting with "#"), which in Python means they are not
+code at all — just text a human can read, with no effect on how the
+program runs. The line in between them (the "risky operation") is
+still live, ordinary code. The net effect is that this server, as it
+stands right now, has no error recovery for anything going wrong on a
+network connection: a client that sends malformed data, disconnects at
+an inopportune moment, or triggers a network-level error will cause an
+exception that is not caught anywhere inside the affected function.
+That exception then travels straight up the chain of function calls —
+out of drop/broadcast/accept and into the main loop, then out of the
+main loop's "try" (which, as explained above, only catches
+KeyboardInterrupt), through the "finally" cleanup, and finally crashes
+the whole server process, disconnecting every player, not just the one
+that caused the problem.
+
+This is very likely a deliberate, temporary state — for example, while
+debugging exactly which step is failing, since letting an exception
+crash the program with a full traceback shows precisely where and why
+it failed, whereas a quietly-caught exception (the original, commented-
+out behavior) would hide that same information. If robustness against
+flaky connections is wanted again, restoring each of these four blocks
+to real try/except statements (removing the "# " from each of the
+listed lines) would bring back the original behavior described for
+drop, broadcast, and accept elsewhere in this document.
 
 --------------------------------------------------------------------
 if __name__ == "__main__": main()
