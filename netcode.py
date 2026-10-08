@@ -45,10 +45,6 @@ ALLOWED = {
 }
 
 
-class ProtocolError(Exception):
-    pass
-
-
 class SafeUnpickler(pickle.Unpickler):
     def find_class(self, module, name):
         if (module, name) not in ALLOWED:
@@ -81,8 +77,8 @@ def recv_msg(sock):
         return None
     try:
         return SafeUnpickler(io.BytesIO(payload)).load()
-    except Exception as e:
-        raise ProtocolError(f"undecodable message: {e!r}") from e
+    except Exception:
+        raise ValueError("undecodable message")
 
 
 class NetClient:
@@ -126,7 +122,7 @@ class NetClient:
                 return
             try:
                 msg = recv_msg(self.sock)
-            except (OSError, ProtocolError):
+            except (OSError, ValueError):
                 msg = None
             if msg is None:
                 self._die()

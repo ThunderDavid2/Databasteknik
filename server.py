@@ -8,7 +8,6 @@ from netcode import (
     JoinRequest,
     JoinResponse,
     PlayerState,
-    ProtocolError,
     RemotePlayerState,
     RosterSnapshot,
     recv_msg,
@@ -32,7 +31,10 @@ def remember(save, info):
 
 def resume_position(save, name):
     saved = save.get(name)
-    return None if saved is None else (saved["x"], saved["y"])
+    if saved is None:
+        return None
+    else:
+        return (saved["x"], saved["y"])
 
 
 def drop(save, clients, sock):
@@ -77,6 +79,10 @@ def accept(save, listener, clients, next_id):
         "char": join_request.char,
         "state": None,
     }
+    if resume is None:
+        resumed_note = ""
+    else:
+        resumed_note = " [resumed]"
     print(
         "+ %s joined as player %d from %s (%d online)%s"
         % (
@@ -84,7 +90,7 @@ def accept(save, listener, clients, next_id):
             next_id,
             addr[0],
             len(clients),
-            "" if resume is None else " [resumed]",
+            resumed_note,
         ),
         flush=True,
     )
@@ -116,7 +122,10 @@ def main():
                 info = clients.get(sock)
                 if info is None:
                     continue
-                msg = recv_msg(sock)
+                try:
+                    msg = recv_msg(sock)
+                except (OSError, ValueError):
+                    msg = None
                 if msg is None:
                     drop(save, clients, sock)
                 elif isinstance(msg, PlayerState):
