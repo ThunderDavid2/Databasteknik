@@ -82,7 +82,6 @@ def recv_msg(sock):
 
 
 class NetClient:
-
     SEND_HZ = 20
 
     def __init__(self, host, name, char, port=PORT):

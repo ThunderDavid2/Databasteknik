@@ -3,16 +3,8 @@ import shelve
 import socket
 import time
 
-from netcode import (
-    PORT,
-    JoinRequest,
-    JoinResponse,
-    PlayerState,
-    RemotePlayerState,
-    RosterSnapshot,
-    recv_msg,
-    send_msg,
-)
+from netcode import PORT, JoinRequest, JoinResponse, PlayerState, RemotePlayerState, RosterSnapshot
+from netcode import recv_msg, send_msg
 
 TICK = 1 / 20
 SAVE_PATH = "players"
@@ -41,22 +33,15 @@ def drop(save, clients, sock):
     info = clients.pop(sock, None)
     if info is not None:
         remember(save, info)
-        print(
-            "- %s (player %d) left (%d online)"
-            % (info["name"], info["id"], len(clients)),
-            flush=True,
-        )
+        print("- %s (player %d) left (%d online)" % (info["name"], info["id"], len(clients)),
+              flush=True)
     sock.close()
 
 
 def broadcast(save, clients):
-    players = [
-        RemotePlayerState(
-            info["id"], info["name"], info["char"], info["state"].x, info["state"].y
-        )
-        for info in clients.values()
-        if info["state"] is not None
-    ]
+    players = [RemotePlayerState(info["id"], info["name"], info["char"], info["state"].x,
+                                 info["state"].y)
+               for info in clients.values() if info["state"] is not None]
     payload = RosterSnapshot(players)
     for sock in list(clients):
         send_msg(sock, payload)
@@ -83,17 +68,8 @@ def accept(save, listener, clients, next_id):
         resumed_note = ""
     else:
         resumed_note = " [resumed]"
-    print(
-        "+ %s joined as player %d from %s (%d online)%s"
-        % (
-            name,
-            next_id,
-            addr[0],
-            len(clients),
-            resumed_note,
-        ),
-        flush=True,
-    )
+    print("+ %s joined as player %d from %s (%d online)%s"
+          % (name, next_id, addr[0], len(clients), resumed_note), flush=True)
     return next_id + 1
 
 
