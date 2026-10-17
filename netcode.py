@@ -7,35 +7,43 @@ import struct
 import time
 
 PORT = 50007
+# SERIALIZATION
 HEADER = struct.Struct("!I")
+# SERIALIZATION
 PROTOCOL = pickle.HIGHEST_PROTOCOL
 
 
+# SERIALIZATION (pickled message)
 class JoinRequest:
     def __init__(self, name, char):
         self.name, self.char = name, char
 
 
+# SERIALIZATION (pickled message)
 class JoinResponse:
     def __init__(self, pid, char, resume=None):
         self.pid, self.char, self.resume = pid, char, resume
 
 
+# SERIALIZATION (pickled message)
 class PlayerState:
     def __init__(self, x, y):
         self.x, self.y = x, y
 
 
+# SERIALIZATION (pickled message)
 class RemotePlayerState:
     def __init__(self, pid, name, char, x, y):
         self.pid, self.name, self.char, self.x, self.y = pid, name, char, x, y
 
 
+# SERIALIZATION (pickled message)
 class RosterSnapshot:
     def __init__(self, players):
         self.players = players
 
 
+# SERIALIZATION (deserialization whitelist)
 ALLOWED = {
     ("netcode", "JoinRequest"),
     ("netcode", "JoinResponse"),
@@ -45,6 +53,7 @@ ALLOWED = {
 }
 
 
+# SERIALIZATION (deserialization)
 class SafeUnpickler(pickle.Unpickler):
     def find_class(self, module, name):
         if (module, name) not in ALLOWED:
@@ -63,7 +72,9 @@ def recv_exact(sock, n):
 
 
 def send_msg(sock, obj):
+    # SERIALIZATION (serialize)
     payload = pickle.dumps(obj, protocol=PROTOCOL)
+    # SERIALIZATION (framing)
     sock.sendall(HEADER.pack(len(payload)) + payload)
 
 
@@ -71,11 +82,13 @@ def recv_msg(sock):
     header = recv_exact(sock, HEADER.size)
     if header is None:
         return None
+    # SERIALIZATION (framing)
     (length,) = HEADER.unpack(header)
     payload = recv_exact(sock, length)
     if payload is None:
         return None
     try:
+        # SERIALIZATION (deserialize)
         return SafeUnpickler(io.BytesIO(payload)).load()
     except Exception:
         raise ValueError("undecodable message")

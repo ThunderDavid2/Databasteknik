@@ -14,6 +14,7 @@ AUTOSAVE = 5.0
 def remember(save, info):
     if info["state"] is None:
         return
+    # SERIALIZATION (write to shelve)
     save[info["name"]] = {
         "x": info["state"].x,
         "y": info["state"].y,
@@ -22,6 +23,7 @@ def remember(save, info):
 
 
 def resume_position(save, name):
+    # SERIALIZATION (read from shelve)
     saved = save.get(name)
     if saved is None:
         return None
@@ -80,6 +82,7 @@ def main():
     listener.listen(8)
     print("listening on port %d, Ctrl-C to stop" % PORT, flush=True)
 
+    # SERIALIZATION (open shelve)
     save = shelve.open(SAVE_PATH)
     clients = {}
     next_id = 1
@@ -120,6 +123,7 @@ def main():
     finally:
         for info in clients.values():
             remember(save, info)
+        # SERIALIZATION (close shelve)
         save.close()
         listener.close()
 
